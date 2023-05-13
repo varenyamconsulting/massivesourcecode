@@ -1,0 +1,826 @@
+<?php
+/**
+ * @file
+ * Code for the TM Notifications feature.
+ */
+
+include_once 'tm_notifications.features.inc';
+include_once 'tm_notifications.subscription_link.inc';
+
+/**
+ * @file tm_notifications.module
+ * 
+ * @author Daniel Silva (daniel.silva@flipside.org)
+ * 
+ */
+
+module_load_include('inc', 'tm_notifications', 'tm_notifications_TMNotification');
+ 
+/**
+ * Implements hook_menu()
+ */
+function tm_notifications_menu() {
+
+  $items['admin/config/tm/tm_notifications'] = array(
+    'title' => 'Notifications',
+    'description' => 'Settings for Travel Massive notifications.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('tm_notifications_messages_admin_form'),
+    'access arguments' => array('manage tm notifications'),
+    'file' => 'tm_notifications.admin.pages.inc',
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  $items['user/%user/subscribe/%/%'] = array(
+    'title' => 'Confirm subscription',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('tm_notifications_confirm_subscription_form'),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+
+  $items['user/%user/unsubscribe/%/%'] = array(
+    'title' => 'Confirm unsubscription',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('tm_notifications_confirm_subscription_form'),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_permission()
+ */
+function tm_notifications_permission() {
+  return array(
+    'manage tm notifications' => array(
+      'title' => t('Manage notifications'),
+      'description' => t('Manage Travel Massive notifications.'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_field_extra_fields()
+ * Add a new field to the user form that contain the notifications.
+ * The actual form element will be created in the form_alter hook
+ */
+function tm_notifications_field_extra_fields() {
+  $return['user']['user']  = array(
+    'form' => array(
+      'tm_notifications' => array(
+        'label' => t('Notifications'),
+        'description' => t('User notifications settings.'),
+        'weight' => 50,
+      ),
+    )
+  );
+
+  return $return;
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter()
+ */
+function tm_notifications_form_user_profile_form_alter(&$form, &$form_state) {
+  $user = $form['#user'];
+  
+  // Get all the registered notifications.
+  $notifications = module_invoke_all('tm_notif_info');
+  
+  if (!empty($notifications)) {
+
+    $form['tm_notifications'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Notification settings'),
+      '#description' => t('On this page you can edit your notifications and reminder settings.'),
+      '#attributes' => array(
+        'class' => array('field-group-fieldset')
+      ),
+      // Tree is needed to keep the array structure when saving the variable.
+      '#tree' => TRUE,
+    );
+    
+    // sort notifications by their printed description
+    $sort = array();
+    foreach ($notifications as $name => $value) {
+      $sort[$name] = $value['description'] . "";
+      // put chapter leader notifications at bottom of notifications
+      $sort[$name] = str_replace("[Chapter Leaders]", "_[Chapter Leaders]", $sort[$name]);
+    }
+    array_multisort($notifications, SORT_DESC, SORT_NUMERIC, $sort);
+    
+    // Special check if a featured member is set to recieve event notifications
+    $event_notifications = array("events_register_flag", "events_waitlist_flag", "events_register_unflag", "events_waitlist_unflag");
+
+    $change_overide = false;
+    $flag = flag_get_flag('featured_member');
+    if ($flag->is_flagged($user->uid)) {
+
+      // search for any events where this user has been featured and field_notify_featured_members = true 
+      $query = "SELECT count(*) AS num_rows
+                FROM field_data_field_event_featured_members 
+                LEFT JOIN field_data_field_notify_featured_members
+                ON field_data_field_event_featured_members.entity_id = field_data_field_notify_featured_members.entity_id 
+                WHERE field_notify_featured_members_value = 1 
+                AND field_event_featured_members_target_id = :uid limit 1";
+      $result = db_query($query, array(':uid' => $user->uid))->fetch();
+      $result->num_rows;
+
+      if ($result->num_rows > 0) {
+        $change_overide = true;
+      }
+    }
+  
+    // check if this user owns any events (member events) 
+    $query = "SELECT count(*) AS num_rows
+              FROM node
+              WHERE `type` = 'event' 
+              AND uid = :uid limit 1";
+    $result = db_query($query, array(':uid' => $user->uid))->fetch();
+    $result->num_rows;
+    if ($result->num_rows > 0) {
+      $change_overide = true;
+    }
+
+    // check if this user is an organizer of any events 
+    $query = "SELECT count(*) AS num_rows
+              FROM field_data_field_organizer
+              WHERE bundle = 'event' 
+              AND field_organizer_target_id = :uid limit 1";
+    $result = db_query($query, array(':uid' => $user->uid))->fetch();
+    $result->num_rows;
+    if ($result->num_rows > 0) {
+      $change_overide = true;
+    }
+
+    foreach ($notifications as $name => $value) {
+      $notif = new TMNotification($name);
+
+      // Determine if the user can change the settings
+      // If change_allowed true and change_allowed_roles, then check if user is in role
+      // Otherwise use value of change_allowed
+      $change_allowed = false;
+      $change_roles_allowed = $notif->getChangeAllowedRoles();
+
+      if ($change_overide && in_array($name, $event_notifications)) {
+        $change_allowed = true;
+      }
+      else if ($notif->isChangeAllowed() && (sizeof($change_roles_allowed) > 0)) {
+        foreach($change_roles_allowed as $role) {
+          if (in_array($role, $user->roles)) {
+            $change_allowed = true;
+          }
+        }
+      } else {
+        $change_allowed = $notif->isChangeAllowed();
+      }
+
+      // format set title for non-chapter leaders
+      $title = $notif->getLabel($value['title']);
+      if ($change_overide) {
+        if (strpos($notif->getName(), "event") !== false) {
+          $title = str_replace("[Chapter Leaders]", "Events &rarr; ", $title);
+        }
+        $title = str_replace("[Chapter Leaders]", "Chapter &rarr; ", $title);
+        $title = str_replace("[Moderation]", "Moderation &rarr; ", $title);
+      }
+
+      if ($change_allowed) {
+        $form['tm_notifications'][$name] = array(
+          '#type' => 'checkbox',
+          '#title' => $title,
+          '#default_value' => $notif->isEnabled($user->uid),
+        );
+      }
+    }
+
+    // Attach submit handler to save the notification state.
+    $form['#submit'][] = 'tm_notifications_user_form_submit';
+  }
+}
+
+/**
+ * Additional submit handler for form user_profile_form.
+ * Used to save the notifications.
+ */
+function tm_notifications_user_form_submit($form, &$form_state) {
+  $user = $form['#user'];
+  foreach ($form_state['values']['tm_notifications'] as $key => $value) {
+    $notif = new TMNotification($key);
+    $notif->setForUser($user->uid, (bool) $value);
+  }
+}
+
+/**
+ * Implements hook_mail()
+ * Compose the email to send.
+ */
+function tm_notifications_mail($key, &$message, $params) {
+
+  global $conf;
+  $notif = new TMNotification($key);
+  $subject = $notif->getEmailSubject();
+  $msg = $notif->getEmailMessage();
+  
+  // STEP 1. 
+  // Replace tokens
+  if (!empty($params['tokens'])) {
+    $subject = token_replace($subject, $params['tokens']);
+    $msg = token_replace($msg, $params['tokens']);
+  }
+  
+  // replace custom tokens ie: __PROFILE_URL__
+  // replace in message and subject
+  foreach ($params['tokens'] as $token_name => $token_value) {
+    if (strpos($token_name, "__") === 0) {
+      $msg = str_replace($token_name, $token_value, $msg);
+      $subject = str_replace($token_name, $token_value, $subject);
+    }
+  }
+
+  // set reply to from token
+  if (isset ($params['tokens']['__REPLY_TO__'])) {
+    if ($params['tokens']['__REPLY_TO__'] != "") {
+      $message['headers']['Reply-To'] = $params['tokens']['__REPLY_TO__'];
+    }
+  }
+
+  // STEP 2. LOAD HTML TEMPLATE
+  // Note: We use http://tedgoas.github.io/Cerberus/ hybrid template
+  $template_file_name = 'tm_notifications-email_template.tpl.php';
+  if (isset($conf["tm_email_custom_template"])) {
+    $template_file_name = $conf["tm_email_custom_template"];
+  }
+  $template_file = drupal_get_path('module', 'tm_notifications') . '/templates/' . $template_file_name;
+  $template = file_get_contents($template_file);
+
+  // STEP 3. SET MAIL HTML HEADERS
+  $module = 'tm_notifications';
+  $language = language_default();
+  //$params = array();
+  $send = FALSE;
+  //$email_message = drupal_mail($module, $key, $email, $language, $params, NULL, $send);
+  $message['headers']['MIME-Version'] = '1.0';
+  $message['headers']['Content-Type'] = 'multipart/mixed;';
+  $message['headers']['Content-Type'] = 'text/html;';
+
+
+  // STEP 4. SET SUBJECT
+  $subject = str_replace("__SERVER_NAME__", $_SERVER["SERVER_NAME"], $subject);
+  $subject = str_replace("__SERVER_HTTP__", $conf["tm_email_server_http"], $subject);  
+  $subject = str_replace("__SITE_NAME__", $conf["tm_site_name"], $subject);  
+
+  $message['subject'] = strip_tags($subject); // check_plain($subject);
+
+
+  // STEP 5. REPLACE BODY AND FOOTER IN HTML TEMPLATE
+  $template = str_replace("__EMAIL_BODY__", $msg, $template);
+  $footer = $conf["tm_email_default_footer"];
+  if (isset ($params['footer'])) {
+    $footer = $params['footer'];
+  }
+  $template = str_replace("__EMAIL_FOOTER__", $footer, $template);
+
+  // STEP 6. ADD UNSUBSCRIBE LINK
+  if (isset($params['tokens']['UNSUBSCRIBE_NOTIFICATION_LINK'])) {
+    $unsubscribe_link = "<a style='text-decoration: underline; color: #9B9B9B;' href='__SERVER_HTTP__://__SERVER_NAME__/" . $params['tokens']['UNSUBSCRIBE_NOTIFICATION_LINK'] . "'>Unsubscribe from this notification</a>";
+  } else {
+    $unsubscribe_link = "Update Your Notification Settings at <a style='text-decoration: underline; color: #9B9B9B;' href='__SERVER_HTTP__://__SERVER_NAME__'>__SERVER_NAME__</a>";
+  }
+  $template = str_replace("__UNSUBSCRIBE_LINK__", $unsubscribe_link, $template);
+
+  // Other vars
+  $template = str_replace("__SERVER_NAME__", $conf["tm_email_server_url_domain"], $template); 
+  $template = str_replace("__SERVER_HTTP__", $conf["tm_email_server_http"], $template);  
+  $template = str_replace("__SITE_NAME__", $conf["tm_site_name"], $template);  
+  $template = str_replace("__EMAIL_SIGNOFF__", $conf["tm_email_signoff"], $template);
+  $template = str_replace("__MEMBERS_LABEL__", $conf["tm_members_label"], $template);
+
+  // Hero image
+  $hero_image = "";
+  if (isset ($params['tokens']['__HERO_IMAGE__'])) {
+    $hero_image = $params['tokens']["__HERO_IMAGE__"];
+  }
+  $template = str_replace("__HERO_IMAGE__", $hero_image, $template); // insert hero image
+
+  // Hero headline
+  $hero_headline = "";
+  if (isset ($params['tokens']['__HERO_HEADLINE__'])) {
+    $hero_headline = $params['tokens']["__HERO_HEADLINE__"];
+  }
+  $template = str_replace("__HERO_HEADLINE__", $hero_headline, $template); // insert hero headline
+
+  // Preheader text
+  $preheader_text = "";
+  if (isset ($params['tokens']['__PREHEADER_TEXT__'])) {
+    $preheader_text = $params['tokens']["__PREHEADER_TEXT__"];
+  }
+  $template = str_replace("__PREHEADER_TEXT__", $preheader_text, $template); // insert preheader text
+
+  // STEP 7. ADD BRANDING MESSAGE TO FOOTER
+  $show_branding = true;
+
+  // hide branding for event notifications and approval flagging
+  if (array_search($key, array('events_register_flag', 'events_register_unflag', 'events_waitlist_flag', 'events_waitlist_unflag', 'events_register_flag_user', 'events_register_unflag_user', 'events_waitlist_flag_user', 'events_waitlist_unflag_user', 'user_approval_need_more_info', 'user_approval_is_company_or_brand', 'user_requested_approval', 'user_approval_non_community', 'user_chapter_join_notify_leaders', 'member_message', 'added_to_list_creator'))) {
+    $show_branding = false;
+  }
+
+  // allow notifications to specify if they want to turn off branding via token 'hide_branding_message'
+  if (isset($params['tokens']['hide_branding_message'])) {
+    if ($params['tokens']['hide_branding_message']) {
+      $show_branding = false;
+    }
+  }
+
+  // display branding
+  if (($show_branding) and (isset($params['tokens']['branding_account_uid']))) {
+    $branding_account = user_load($params['tokens']['branding_account_uid']);
+    // call tm_branding_get_element() with no session cache (ie: sending multiple emails)
+    $branding_email_footer_html = tm_branding_get_element("email_footer_html", $branding_account, true);
+    $template = str_replace("__EMAIL_BRAND_MESSAGE__", $branding_email_footer_html, $template);
+  } else {
+    $template = str_replace("__EMAIL_BRAND_MESSAGE__", "", $template);
+  }
+ 
+  // STEP 8. LOAD HTML TEMPLATE INTO EMAIL BODY
+  $message['body'] = $template;
+
+  // STEP 9. Calendar attachment
+  if (isset($params['tokens']['__EVENT_CALENDAR_LINK__'])) {
+
+    $event = node_load($params['tokens']['node']->nid);
+    $ical_filename = tm_events_generate_ical_filename($event);
+    $ical = tm_events_generate_ical($event);
+
+    $attachment = array(
+      'filecontent' => $ical,
+      'filename' => $ical_filename,
+      'filemime' => 'text/calendar; charset=utf-8'
+    );
+    $message['params']['attachments'][] = $attachment;
+
+  }
+
+  // STEP 9. Cron Flag
+  // TODO: This is untested with mimemail
+  // Notifications that are likely to be sent to multiple user at the
+  // same time should be put in a queue and sent through cron.
+  // To achieve this we mimic the behaviour of queue_mail and use
+  // its functions to accomplish this.
+  // Whether or not to use cron is defined by the developer in the hook.
+  $notifications = module_invoke_all('tm_notif_info');
+  $info = $notifications[$key];
+  if (isset($info['use_cron']) && $info['use_cron']) {
+    // Store the message for sending on cron.
+    _queue_mail_get_queue()->createItem($message);
+    // And prevent the message from being sent instantly.
+    $message['send'] = FALSE;
+  }
+
+}
+
+/**
+ * Implements hook_cronapi()
+ */
+function tm_notifications_cronapi() {
+  $items = array();
+  $items['tm_notifications_scheduled_worker_run'] = array(
+    'title' => t('Run scheduled workers'),
+    'callback' => 'tm_notifications_scheduled_worker',
+    'enabled' => TRUE,
+    'scheduler' => array(
+      'name' => 'crontab',
+      'crontab' => array(
+        'rules' => array('*/5 * * * *'),
+      ),
+    ),
+  );
+  return $items;
+}
+
+/**
+ * Cron worker.
+ * If the process fails, log and the queue handler will remove the item
+ */
+function tm_notifications_scheduled_worker() {
+
+  try {
+    tm_notifications_scheduled_worker_run();
+  } catch (Exception $e) {
+    watchdog_exception("tm_notifications", $e, "tm_notifications_scheduled_worker(): Failed with message @message", array(
+        '@message' => (string) $e,
+      ), WATCHDOG_ERROR);
+  }
+}
+
+
+/**
+ * Cron worker.
+ */
+function tm_notifications_scheduled_worker_run() {
+
+  $now = new DateTime(null, new DateTimeZone('UTC'));
+
+  $result = db_query('SELECT * FROM {tm_notifications_worker_schedule} WHERE status = :status AND schedule_date <= :date', array(
+    'status' => 1 ,
+    'date' => $now->format('Y-m-d H:i:s')
+  ))->fetchAll();
+  
+  foreach ($result as $notification) {
+
+    // If the process fails, log and the scheduled item will be removed.
+    try {
+
+      $data = @unserialize($notification->data);
+      $fn = $notification->worker;
+      
+      if (function_exists($fn)) {
+        $fn($data);
+      }
+
+    } catch (Exception $e) {
+      watchdog_exception("tm_notifications", $e, "tm_notifications_scheduled_worker_run(): Failed with message @message", array(
+          '@message' => (string) $e,
+        ), WATCHDOG_ERROR);
+    }
+    
+    // Clean rows.
+    tm_notifications_schedule_remove($notification->identifier);
+  }
+
+}
+
+/**
+ * Notify the user using the data set through the settings form.
+ * Only active users will be notified.
+ * 
+ * @param $notification
+ *   Notification name.
+ * @param StdClass $account
+ *   User account. (destination)
+ * @param array $tokens
+ *   If the message includes tokens they need to be specified here. This uses
+ *   token settings.
+ * 
+ * @return boolean
+ *   TRUE if the notification is enabled for the user and it was scheduled.
+ */
+function tm_notifications_notify($notification_name, $account, $tokens = array(), $from = null) {
+
+  global $conf;
+
+  // You can go one step further and disable any outbound notifications triggered by a non-validated member
+  // Just uncomment below.
+  /*global $user;
+  if (in_array('non-validated', $user->roles)) {
+    watchdog('Not sending email trigged by non-verified user ', $notification_name . ", " . $account->mail);
+    return;
+  }*/
+
+  // if notified user is not validated, then don't trigger any notifications
+  // allow the user_approved and related notification to be sent
+  $allow_unverified_notifications = array("user_approved", "user_approval_need_more_info", "user_approval_is_company_or_brand", "user_approval_non_community");
+  if (in_array('non-validated', $account->roles) && !in_array($notification_name, $allow_unverified_notifications)) {
+    watchdog('Not sending email to a non-verified user ', $notification_name . ", " . $account->mail);
+    return;
+  }
+
+  $notification = new TMNotification($notification_name);
+  if ($notification->isEnabled($account->uid) && $account->status) {
+
+    // Add unsubscribe link if notification change allowed
+    // Note: Hide one-click subscription link if reply-to: another member
+    $reply_to_member = false;
+    if (isset($tokens['reply_to_member'])) {
+        $reply_to_member = $tokens['reply_to_member'];
+    }
+
+    if ($notification->isChangeAllowed() and (!$reply_to_member)) {
+      $secret_hash = tm_notifications_generate_secret_hash($account->uid, $notification_name);
+      $tokens["UNSUBSCRIBE_NOTIFICATION_LINK"] = "user/" . $account->uid . "/unsubscribe/" . $notification_name . "/" . $secret_hash;
+    }
+
+    // add account we are branding to list of tokens
+    // we can then pick it up in tm_notifications_mail
+    $tokens['branding_account_uid'] = $account->uid;
+
+    // send mail
+    drupal_mail('tm_notifications', $notification->getName(), $account->mail, user_preferred_language($account), array('tokens' => $tokens), $from);
+    return TRUE;
+
+  }
+  
+  return FALSE;
+}
+
+
+/**
+ * Generate secret hash to create unsubscribe urls
+ */
+function tm_notifications_generate_secret_hash($uid, $notification_name) {
+
+  global $conf;
+  $secret_hash = md5($conf["tm_notifications_subscription_secret_key"] . "_" . $uid  . "_" . $notification_name);
+  return $secret_hash;
+
+}
+
+
+/**
+ * Schedules a worker to run at a given date.
+ * Note: The worker may not be run exactly at the specified date. +-5min
+ * 
+ * When a worker is scheduled, additional data can be saved in the database.
+ * When a crun runs checks if there are any workers to call and calls them 
+ * with the provided data as parameter.
+ * 
+ * In the worker the function tm_notifications_notify() should be used to
+ * send the notifications.
+ * 
+ * Note: It is HIGHLY advisable to set the use_cron param in the
+ * hook_tm_notif_info() to TRUE to prevent timeouts.
+ * 
+ * @see tm_notifications_notify()
+ * 
+ * @param String $identifier
+ *   A unique identifier for this schedule.
+ *   This can be any string but should contain the name of the module
+ *   that is making the call.
+ *   This is useful when a schedule needs to be removed.
+ * @param DateTime $date
+ *   The date when the notification should be sent.
+ * @param StdClass $worker
+ *   The worker to run. Must be a valid function.
+ * @param array $data
+ *   Additional data that will be passed to the worker.
+ * 
+ * @return boolean
+ *   FALSE if the $worker does not exist, TRUE otherwise.
+ */
+function tm_notifications_schedule($identifier, DateTime $date, $worker, $data = array()) {
+  // Save in UTC format.
+  $date->setTimezone(new DateTimeZone('UTC'));
+  
+  if (!function_exists($worker)) {
+    return FALSE;
+  }
+  
+  db_insert('tm_notifications_worker_schedule')
+    ->fields(array(
+      'schedule_date' => $date->format('Y-m-d H:i:s'),
+      'identifier' => $identifier,
+      'worker' => $worker,
+      'data' => serialize($data),
+  ))->execute();
+  
+  return TRUE;
+}
+
+/**
+ * Removes the schedule with the given identifier.
+ * 
+ * @param String $identifier
+ *   The unique identifier for the schedule.
+ * 
+ * @return boolean
+ *   The result of the operation.
+ */
+function tm_notifications_schedule_remove($identifier) {
+  $res = db_delete('tm_notifications_worker_schedule')
+  ->condition('identifier', $identifier)
+  ->execute();
+  
+  return (bool) $res;
+}
+
+/**
+ * Removes all user related notifications from the database.
+ * The settings set through the admin page will not be removed.
+ * 
+ * @param String $notification_name
+ *   The name of the notification.
+ */
+function tm_notifications_preferences_remove($notification_name) {
+  db_delete('tm_notifications')
+  ->condition('bundle', $notification_name)
+  ->execute();
+}
+
+/**
+ * Removes all entries in the database related to the given notification.
+ * This refers to the user preferences (subscribed/unsubscribed)
+ * All the admin settings are also removed.
+ * 
+ * NOTE: When a module implementing notifications is uninstalled this function
+ * should be called.
+ * 
+ * @param String $notifications_name
+ */
+function tm_notifications_preferences_purge($notification_name) {
+  tm_notifications_preferences_purge_bulk(array($notification_name));
+}
+
+/**
+ * Removes all entries in the database related to the given notifications.
+ * This refers to the user preferences (subscribed/unsubscribed)
+ * All the admin settings are also removed.
+ * 
+ * NOTE: When a module implementing notifications is uninstalled this function
+ * should be called.
+ * 
+ * @param Array $notifications_name
+ */
+function tm_notifications_preferences_purge_bulk($notification_names) {
+  module_load_include('inc', 'tm_notifications', 'tm_notifications_TMNotification');
+  foreach($notification_names as $name) {
+    $notif = new TMNotification($name);
+    
+    tm_notifications_preferences_remove($notif->getName());
+    variable_delete($notif->getVarName());
+  }
+}
+
+/**
+ * Helper method to render hero image html
+ */
+function tm_notifications_render_hero_image_html($hero_image_src, $hero_image_link = null, $hero_image_alt_text = "image") {
+
+  // Hero image template
+  $hero_image_template = '<tbody>
+    <tr>
+      <td height="18" style="font-size: 1px; line-height: 1px;">&nbsp;</td>
+    </tr>
+  </tbody>
+  <tbody>
+    <tr>
+      <td valign="top" align="center" style="padding: 0 5px;">
+        __A_TAG_OPEN__<img src="__HERO_IMAGE_SRC__" width="520" height="" alt="" style="border: 0; line-height: 100%; outline: 0; -ms-interpolation-mode: bicubic; border-radius: 6px; max-width: 100%; height: auto; display: block; Margin: 0 auto; color: #1B1B1B;">__A_TAG_CLOSE__
+      </td>
+    </tr>
+    <tr>
+      <td height="21" style="font-size: 1px; line-height: 1px;">&nbsp;</td>
+    </tr>
+  </tbody>';
+
+  // Link
+  $a_tag_open = "";
+  $a_tag_close = "";
+  if ($hero_image_link != null) {
+    $a_tag_open = '<a href="' . $hero_image_link . '">';
+    $a_tag_close = '</a>';   
+  }
+
+  // Alt text - strip ' in alt text
+  $hero_image_alt_text = str_replace("'", "", $hero_image_alt_text);
+
+  // Render hero image
+  $hero_image_html = str_replace("__A_TAG_OPEN__", $a_tag_open, $hero_image_template);
+  $hero_image_html = str_replace("__A_TAG_CLOSE__", $a_tag_close, $hero_image_html);
+  $hero_image_html = str_replace("__HERO_IMAGE_SRC__", $hero_image_src, $hero_image_html);
+  $hero_image_html = str_replace("__HERO_IMAGE_ALT__", $hero_image_alt_text, $hero_image_html);
+
+  return $hero_image_html;
+}
+
+/**
+ * Helper method to render hero headline html
+ */
+function tm_notifications_render_hero_headline_html($hero_text) {
+
+  // Hero headline
+  $hero_headline_template = '<tbody>
+  <tr>
+    <td class="pc-xs-fs-30 pc-xs-lh-42 pc-fb-font" style="padding: 0 5px 25px 5px; font-family: \'Helvetica Neue\', Helvetica, Arial, sans-serif; font-size: 36px; font-weight: 800; line-height: 46px; letter-spacing: -0.6px; color: #1B1B1B; text-align: center;" valign="top">
+      <div style="text-align: left;">__HERO_HEADLINE_TEXT__</div>
+    </td>
+  </tr>
+  <tr>
+    <td height="10" style="font-size: 1px; line-height: 1px;">&nbsp;</td>
+  </tr>
+</tbody>';
+
+  // Render hero
+  $hero_text = strip_tags($hero_text);
+  $hero_headline_html = str_replace("__HERO_HEADLINE_TEXT__", $hero_text, $hero_headline_template);
+
+  return $hero_headline_html;
+}
+
+/**
+ * Helper method to render button
+ */
+function tm_notifications_render_button_html($button_label, $button_url) {
+
+  // Button
+  $button_template = '<p style="text-align: center;"><!--[if gte mso 9]><br><center><![endif]--><div style="padding-top: 16px; padding-bottom: 24px;"><table style="margin-left:auto; margin-right:auto;" border="0" cellpadding="0" cellspacing="0" role="presentation">
+  <tbody>
+    <tr>
+      <td style="padding: 13px 17px; border-radius: 8px; background-color: #1595E7;" bgcolor="#1595E7" valign="top" align="center">
+        <a href="__BUTTON_URL__" style="line-height: 24px; text-decoration: none; word-break: break-word; font-weight: 600; display: block; font-family: \'Helvetica Neue\', Helvetica, Arial, sans-serif; font-size: 16px; color: #ffffff;">__BUTTON_TEXT__</a>
+      </td>
+    </tr>
+  </tbody>
+</table></div><!--[if gte mso 9]></center><br><![endif]--></p>';
+
+  $button_text = strip_tags($button_label);
+  $button_url = str_replace('"', "", strip_tags($button_url));
+
+  // Render button
+  $button_html = str_replace("__BUTTON_TEXT__", $button_label, $button_template);
+  $button_html = str_replace("__BUTTON_URL__", $button_url, $button_html);
+
+  return $button_html;
+}
+
+/**
+ * Helper method to render member
+ */
+function tm_notifications_render_member_html($account) {
+
+  // Member template
+  $member_template = '<table border="0" cellpadding="0" cellspacing="0" width="100%" role="presentation">
+  <tbody>
+    <tr>
+      <td class="pc-sm-p-35-30 pc-xs-p-25-20" valign="top" bgcolor="#ffffff" style="padding: 40px; background-color: #ffffff">
+        <table border="0" cellpadding="0" cellspacing="0" style="text-align: center;" width="100%" align="center" role="presentation">
+          <tbody>
+            <tr>
+              <td valign="top" align="center">
+                <a href="__MEMBER_URL__"><img alt="__MEMBER_NAME__" src="__MEMBER_IMAGE_SRC__" width="74" alt="" style="max-width: 74px; height: 74px; border: 0; text-decoration: none; line-height: 100%; outline: 0; -ms-interpolation-mode: bicubic; display: block; Margin: 0 auto; border-radius: 50%;" height=""></a>
+              </td>
+            </tr>
+            <tr>
+              <td height="10" style="font-size: 1px; line-height: 1px;">&nbsp;</td>
+            </tr>
+          </tbody>
+          <tbody>
+            <tr>
+              <td class="pc-fb-font" valign="top" style="text-align: center; font-family: \'Helvetica Neue\', Helvetica, Arial, sans-serif; font-size: 16px; font-weight: 500; line-height: 21px; letter-spacing: -0.1px; color: #1B1B1B;"><a href="__MEMBER_URL__">__MEMBER_NAME__</a></td>
+            </tr>
+            <tr>
+              <td height="2" style="font-size: 1px; line-height: 1px;">&nbsp;</td>
+            </tr>
+          </tbody>
+          __MEMBER_TITLE_HTML__
+        </table>
+      </td>
+    </tr>
+  </tbody>
+</table>';
+
+  // Member title
+  $member_title_template = '<tbody>
+  <tr>
+    <td class="pc-fb-font" valign="top" style="text-align: center; font-family: \'Helvetica Neue\', Helvetica, Arial, sans-serif; font-size: 14px; font-weight: normal; line-height: 20px; letter-spacing: -0.2px; color: #9B9B9B;">__MEMBER_TITLE__</td>
+  </tr>
+</tbody>';
+
+  // Fist name
+  $first_name = "Member";
+  if (isset($account->field_user_first_name[LANGUAGE_NONE][0]['value'])) {
+    $first_name = strip_tags($account->field_user_first_name[LANGUAGE_NONE][0]['value']);
+  }
+
+  // Last name
+  $last_name = "";
+  if (isset($account->field_user_last_name[LANGUAGE_NONE][0]['value'])) {
+    $last_name .= " " . strip_tags($account->field_user_last_name[LANGUAGE_NONE][0]['value']);
+  }
+
+  // Full name
+  $member_name = $first_name . " " . $last_name;
+  $member_name = str_replace("'", "", $member_name);
+
+  // Member title
+  $member_titles = array();
+  if (isset($account->field_job_role[LANGUAGE_NONE][0]['value'])) {
+    $member_titles[] = strip_tags(trim($account->field_job_role[LANGUAGE_NONE][0]['value']));
+  }
+  if (isset($account->field_job_organization[LANGUAGE_NONE][0]['value'])) {
+    $member_titles[] = strip_tags(trim($account->field_job_organization[LANGUAGE_NONE][0]['value']));
+  }
+  $member_title = strip_tags(implode(", ", $member_titles));
+
+  // Member title html
+  $member_title_html = "";
+  if ($member_title != "") {
+    $member_title_html = str_replace("__MEMBER_TITLE__", $member_title, $member_title_template);
+  }
+
+  // Member url
+  $member_url = "__SERVER_HTTP__://__SERVER_NAME__/user/" . $account->uid;
+
+  // Avatar
+  $member_avatar_url = image_style_url("avatar", _tm_users_get_avatar_uri($account));
+  $member_image_src = file_create_url($member_avatar_url);
+
+  // Render member
+  $member_html = str_replace("__MEMBER_NAME__", $member_name, $member_template);
+  $member_html = str_replace("__MEMBER_TITLE_HTML__", $member_title_html, $member_html);
+  $member_html = str_replace("__MEMBER_URL__", $member_url, $member_html);
+  $member_html = str_replace("__MEMBER_IMAGE_SRC__", $member_image_src, $member_html);
+
+  return $member_html;
+}

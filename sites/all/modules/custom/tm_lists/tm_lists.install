@@ -1,0 +1,80 @@
+<?php
+
+/**
+ * Implements hook_schema().
+ */
+function tm_lists_schema() {
+  $schema = array();
+  $schema['tm_lists'] = array(
+    'description' => 'Lists',
+    'fields' => array(
+      'id' => array(
+        'description' => 'The unique ID.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'list_id' => array(
+        'description' => 'The list node ID.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'entity_id' => array(
+        'description' => 'The entity_id ID.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'entity_type' => array(
+        'description' => 'The entity_id type.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'uid' => array(
+        'description' => 'User ID of who added to the list.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'comment' => array(
+        'description' => 'Optional comment.',
+        'type' => 'text',
+        'not null' => FALSE,
+      ),
+      'timestamp' => array(
+        'description' => 'The Unix timestamp when the item was created.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0, 
+      ),
+      'sort_order' => array(
+        'description' => 'The sort order.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 1, 
+      ),
+      'is_published' => array(
+        'description' => 'List item is published.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'timestamp_notified' => array(
+        'description' => 'The Unix timestamp when a notification was sent for the item.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0, 
+      ),
+    ),
+    'primary key' => array('id'),     
+    'indexes' => array(
+      'list_id' => array('list_id'),
+      'entity_id_entity_type' => array('entity_id', 'entity_type'),
+      'list_timestamp' => array('list_id', 'timestamp'),
+      'timestamp' => array('timestamp'),  
+    ),  
+  );
+  return $schema;
+}

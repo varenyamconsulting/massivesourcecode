@@ -1,0 +1,410 @@
+<?php
+/**
+ * @file
+ * Code for the TM Chapters feature.
+ */
+
+include_once 'tm_chapters.features.inc';
+include_once 'tm_chapters.contact.inc';
+include_once 'tm_chapters.csv.inc';
+include_once 'tm_chapters.display.inc';
+include_once 'tm_chapters.edit.inc';
+include_once 'tm_chapters.helpers.inc';
+include_once 'tm_chapters.leaders.inc';
+include_once 'tm_chapters.drush.inc';
+include_once 'tm_chapters.communication.inc';
+include_once 'tm_chapters.moderation.inc';
+include_once 'tm_chapters.grants.inc';
+
+/**
+ * Implement hook_init()
+ */
+function tm_chapters_init() {
+
+  // custom permissions for /chapters/X/unapproved-members
+  if ((arg(0) == 'chapters') and (arg(2) == 'unapproved-members')) {
+    
+    global $user;
+
+    $nid = _orig_nid();
+
+    if($nid == 0) {
+      print drupal_not_found();
+      return false;
+    }
+
+    // check if:
+    // - chapter leader, or community manager
+    // - moderator, or
+    // - administrator
+    if (!(tm_users_is_chapter_leader($user->uid, $nid) or (in_array("moderator", $user->roles)) or (in_array("administrator", $user->roles)))) {
+      drupal_access_denied();
+      drupal_exit();
+    }
+
+  }
+}
+
+/**
+ * Implements hook_menu()
+ */
+function tm_chapters_menu() {
+  
+  global $conf;
+
+  $items['chapters/%/message'] = array(
+    'title' => t('Message chapter leaders'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('tm_chapters_contact_form',1),
+    'access arguments' => array('flag follow_members'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['chapters/%/export'] = array(
+    'title' => t('Download Member List'),
+    'page callback' => 'tm_chapters_download_csv',
+    'access callback' => 'tm_chapters_download_csv_check_permission',
+    'type' => MENU_CALLBACK,
+  );
+  $items['chapters/%/export/message'] = array(
+    'title' => $conf["tm_chapters_download_csv_role_required_title"],
+    'page callback' => 'tm_chapters_download_csv_request_access_message',
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['chapters/%/export/confirm'] = array(
+    'title' => t('Export Members'),
+    'page callback' => 'tm_chapters_download_csv_confirm',
+    'access callback' => 'tm_chapters_download_csv_check_permission',
+    'type' => MENU_CALLBACK,
+  );
+  $items['chapters/send-announcement/%node'] = array(
+    'title' => t('Send Chapter Announcement'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('tm_chapters_communication_form'),
+    'access callback' => 'tm_chapters_check_announcement_callback',
+    'attributes' => array('class' => 'classname'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['chapters/send-announcement-test/%node'] = array(
+    'title' => t('Send test email'),
+    'page callback' => 'tm_chapters_test_email_ajax',
+    'access callback' => 'tm_chapters_check_announcement_callback',
+    'type' => MENU_CALLBACK,
+  );
+  $items['chapters/send-announcement-callback/%node'] = array(
+    'title' => t('Send chapters emails'),
+    'page callback' => 'tm_chapters_send_emails_ajax',
+    'access callback' => 'tm_chapters_check_announcement_callback',
+    'type' => MENU_CALLBACK,
+  );
+  $items['chapters/moderation-chapter-list-ajax/%/%'] = array(
+    'title' => 'Chapter list ajax',
+    'page callback' => 'tm_chapters_moderation_chapters_list_ajax',
+    'access arguments' => array('approve users'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['chapters/moderation-chapter-add-member/%/%'] = array(
+    'title' => 'Add member to chapter',
+    'page callback' => 'tm_chapters_moderation_chapters_add_member_callback',
+    'access arguments' => array('approve users'),
+    'type' => MENU_CALLBACK,
+  );
+   $items['chapters/moderation-chapter-remove-member/%/%'] = array(
+    'title' => 'Remove member from chapter',
+    'page callback' => 'tm_chapters_moderation_chapters_remove_member_callback',
+    'access arguments' => array('approve users'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['chapters/image_wall'] = array(
+    'page callback' => 'tm_chapters_profile_wall',
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+  );
+  return $items;
+}
+
+/**
+ * Joining first chapter sets home chapter 
+ * https://github.com/travelmassive/massiveplatform/issues/28
+ */
+function tm_chapters_flag_flag($flag, $entity_id, $account, $flagging) {
+
+  // only listen for signup to chapter
+  if ($flag->name != 'signup') {
+    return;
+  }
+
+  // get user who flagged
+  $user = user_load($account->uid);
+
+  // if they don't have a home chapter, set this as their home chapter
+  if (sizeof($user->field_home_chapter) == 0) {
+    $user->field_home_chapter[LANGUAGE_NONE][0]['target_id'] =  $entity_id;
+    user_save($user);
+  }
+}
+
+/**
+ * If leaving home chapter, also remove home chapter from profile
+ */
+function tm_chapters_flag_unflag($flag, $entity_id, $account, $flagging) {
+
+  // only listen for signup to chapter
+  if ($flag->name != 'signup') {
+    return;
+  }
+
+  // get user who unflagged
+  $user = user_load($account->uid);
+
+  // nothing to do if user doesn't have a home chapter
+  if (sizeof($user->field_home_chapter) == 0) {
+    return;
+  }
+
+  // fetch list of chapters the user has joined
+  $chapters_nids = array();
+  $flags = flag_get_user_flags("node", null, $account->uid);
+  foreach ($flags as $flag_name => $flag) {
+    if ($flag_name == "signup") {
+      foreach($flag as $f) {
+        $chapters_nids[] = $f->entity_id;
+      }
+    }
+  }
+
+  // remove unflagging chapter from list of user's chapters
+  if(($key = array_search($entity_id, $chapters_nids)) !== false) {
+    unset($chapters_nids[$key]); 
+  }
+
+  // check if user is no longer in their home chapter
+  $home_chapter_id = $user->field_home_chapter[LANGUAGE_NONE][0]['target_id'];
+  if (($key = array_search($home_chapter_id, $chapters_nids)) === false) {
+    // Remove home chapter
+    $user->field_home_chapter[LANGUAGE_NONE] = array();
+    user_save($user);
+  }
+
+}
+
+/**
+ * Add sort toggles to chapters page
+ */
+function tm_chapters_page_alter(&$page) {
+
+  global $conf;
+
+  // Split url parts
+  $url_parts = explode("/", request_path());
+
+  // catch either:
+  // /chapters
+  // /chapters/sort/title
+  // /groups
+  if ((($url_parts[0] == "chapters") and ((sizeof($url_parts) == 1) or (sizeof($url_parts) == 3)))
+    or (($url_parts[0] == "groups") and (sizeof($url_parts) == 1))) {
+
+    // don't show on special chapters page
+    // ie: invitations, contact, unapproved-members, insights, export
+    if (sizeof($url_parts) == 3) {
+      if (in_array($url_parts[2], array("invitations", "message", "unapproved-members", "insights", "export", "announcement", "commissions", "commissions-by-region"))) {
+        return;
+      }
+
+      if (in_array($url_parts[1], array("send-announcement"))) {
+        return;
+      }
+
+    }
+
+    $sort = "members"; // default sort method
+    if (sizeof($url_parts) == 3) {
+      $sort = $url_parts[2]; // ie: title for /chapters/sort/title
+    }
+
+    // groups
+    if ($url_parts[0] == "groups") {
+      $sort = "groups";
+    }
+   
+    // create css classes
+    if ($sort == "members") { $members_active = "is-active active"; } else { $members_active = ""; }
+    if ($sort == "title") { $title_active = "is-active active"; } else { $title_active = ""; }
+    if ($sort == "created") { $created_active = "is-active active"; } else { $created_active = ""; }
+    if ($sort == "groups") { $groups_active = "is-active active"; } else { $groups_active = ""; }
+
+    // create button css
+    $html = '
+    <ul class="tabs-primary tabs primary">
+      <li class="tabs-primary__tab ' . $members_active . '">
+        <a href="/chapters" class="tabs-primary__tab-link '.$members_active.'">Chapters</a>
+      </li>';
+
+    if ($conf["tm_chapters_groups_enabled"] == true) {
+      $html .= '<li class="tabs-primary__tab ' . $groups_active . '">
+        <a href="/groups" class="tabs-primary__tab-link '.$groups_active.'">Groups</a>
+      </li>';
+    }
+
+    $html .= '<li class="tabs-primary__tab ' . $title_active . '">
+        <a href="/chapters/sort/title" class="tabs-primary__tab-link '.$title_active.'">A &rarr; Z</a>
+      </li>
+      <li class="tabs-primary__tab ' . $created_active . '">
+        <a href="/chapters/sort/created" class="tabs-primary__tab-link '.$created_active.'">New</a>
+      </li>
+    </ul>';
+
+    // add html to page header
+    $page['header'] = array('#markup' => $html);
+
+  }
+}
+
+/**
+ * Modify views 
+ */
+function tm_chapters_views_pre_view(&$view, &$display_id, &$args) {
+  // unapproved-members page: set argument to node id (instead of chapter name slug)
+  if (($display_id == "unapproved_members_in_chapter") && ($view->name == "unapproved_users")) {
+    $nid = _orig_nid();
+    $args[0] = $nid;
+  }
+
+}
+
+/**
+ * Prevent moderators to delete chapters that have members
+ */
+function tm_chapters_form_node_delete_confirm_alter(&$form, &$form_state, $form_id) {
+
+  // Check if we have a node id and stop if not
+  if (empty($form['nid']['#value'])) {
+    return;
+  }
+  
+  // Load the node from the form
+  $chapter_id = $form['nid']['#value'];
+  if (!_tm_chapters_check_moderator_delete($chapter_id)) {
+    drupal_access_denied();
+  }
+}
+
+/**
+ * Check if chapter can be removed by a moderator
+ */
+function _tm_chapters_check_moderator_delete($chapter_id) {
+
+  global $user;
+  if (in_array("moderator", $user->roles)) { 
+
+    $flag = flag_get_flag('signup');
+    $amount_members = $flag->get_count($chapter_id);
+
+    if ($amount_members > 0) {
+      // chapter has members
+      return false;
+    }
+  }
+
+  return true; 
+}
+
+/** 
+ * Add a link to guest members on chapter members page
+ */
+function tm_chapters_views_post_execute(&$view) {
+
+  // redirect to /chapters if /chapters/foo
+  if (($view->name == 'chapters')) {
+    if (arg(1) != "") {
+      if ((arg(1) != "sort") and (arg(1) != "map")) {
+         drupal_goto("chapters");
+      }
+    }
+  }
+
+  if (($view->name == 'member_listings') and (arg(2) == "members")) {
+
+    global $conf;
+    global $user;
+
+    $nid = arg(1);
+
+    // show toggle all members link if only displaying approved members
+    // restrict to chapter leaders, moderators
+    $toggle_all_members_link = "";
+
+    if (isset($conf["tm_community_show_unapproved_users"])) {
+      if ($conf["tm_community_show_unapproved_users"] == false) {
+
+        if ((in_array('administrator', $user->roles)) or in_array('chapter leader', $user->roles) or in_array('moderator', $user->roles)) {
+
+          if (isset($_GET["show_all_members"])) {
+            $page_title = "Guest Members";
+            $toggle_all_members_link = "<div><a style='margin-left: 0.5rem;' class='bttn bttn-tertiary bttn-m' href='/node/" . $nid . "/members'>Hide Guest Members</a></div>";
+
+          } else {
+            $page_title = "Verified Members";
+            $toggle_all_members_link = "<div><a class='bttn bttn-tertiary bttn-m' href='/node/" . $nid . "/members?show_all_members'>Show Guest Members</a></div>";
+          }
+        }
+      }
+    }
+
+    $chapter = node_load($nid);
+    $view->build_info['title'] = "Members in " . tm_chapters_formal_name($chapter) . $toggle_all_members_link;
+  }
+
+}
+
+/** 
+ * Display or hide unapproved members
+ */
+function tm_chapters_views_query_alter(&$view, &$query) {
+
+  // Use OR for contextual queries in related_events
+  // This allows us to show chapter and published chapter events
+  // see: https://www.drupal.org/node/1451218#comment-6136692
+  if ($view->name == 'related_events') {
+    if ($query->options['query_comment'] == 'related_events') {
+      $query->where[0]['type'] = 'OR';
+    }
+  }
+
+  // Show unapproved members in member listings
+  if ($view->name == 'member_listings') {
+
+    global $conf;
+
+    // 1. Filter user roles
+    // INNER JOIN {users_roles} users_roles ON users.uid = users_roles.uid
+    // ... AND (users_roles.rid = '6') ))
+    $tm_community_show_unapproved_users = false;
+    if (isset($conf["tm_community_show_unapproved_users"])) {
+      $tm_community_show_unapproved_users = $conf["tm_community_show_unapproved_users"];
+    }
+
+    // allow chapter leaders, moderator to override and show all members
+    if (isset($_GET["show_all_members"])) {
+
+      global $user;
+      if ((in_array('administrator', $user->roles)) or in_array('chapter leader', $user->roles) or in_array('moderator', $user->roles)) {
+        $tm_community_show_unapproved_users = true;
+      }
+
+    }
+
+    if (!$tm_community_show_unapproved_users) {
+
+      // Add filter for approved users only
+      $role = user_role_load_by_name('approved user');
+      $join = new views_join;
+      $join->construct('users_roles', 'users', 'uid', 'uid', array(), 'INNER');
+      $query->add_relationship('users_roles', $join, 'users');
+      $query->add_where(0, "users_roles.rid", $role->rid, "=");
+
+    }
+    
+  }
+}

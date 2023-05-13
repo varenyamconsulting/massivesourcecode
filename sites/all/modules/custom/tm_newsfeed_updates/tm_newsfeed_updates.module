@@ -1,0 +1,230 @@
+<?php
+
+// tm_newsfeed_updates.module
+
+include_once 'tm_newsfeed_updates.controller.inc';
+include_once 'tm_newsfeed_updates.render.inc';
+
+
+/**
+ * Implements hook_menu()
+ */
+function tm_newsfeed_updates_menu() {
+
+  $items = array();
+
+  $items['newsfeed/poll_notifications'] = array(
+    'page callback' => 'tm_newsfeed_updates_poll_notifications',
+    'access arguments' => array('access content')
+  );
+
+  return $items;
+}
+
+/** 
+ * Implement hook_init()
+ */
+function tm_newsfeed_updates_init() {
+
+  global $conf;
+  global $user;
+
+  $initial_delay = $conf["tm_newsfeed_updates_initial_delay"];
+  $focus_delay = $conf["tm_newsfeed_updates_focus_delay"];
+
+  // beta testers
+  if (isset($conf["tm_newsfeed_updates_beta_testers"])) {
+    if (!in_array($user->uid, $conf["tm_newsfeed_updates_beta_testers"])) {
+      return;
+    }
+  }
+
+  // only show home page for anonymous users
+  if (request_uri() != "/" and !user_is_logged_in()) {
+    return;
+  }
+
+  // only show on user and nodes views
+  $current_path = current_path();
+  $parts = explode("/", $current_path);
+  $is_valid_page = false;
+  if (sizeof($parts) == 2) {
+    if (($parts[0] == "user") or ($parts[0] == "node")) {
+      if (is_numeric($parts[1])) {
+        $is_valid_page = true;
+      }
+    }
+  }
+  if ($current_path == "frontpage") {
+     $is_valid_page = true;
+  }
+  if (!$is_valid_page) {
+    return;
+  }
+
+  // check if turned off on event pages
+  if (isset($conf["tm_newsfeed_updates_hide_events"])) {
+    if ($conf["tm_newsfeed_updates_hide_events"]) {
+      $path_alias = drupal_get_path_alias($current_path);
+      if (strpos($path_alias, "events") !== false) {
+        return;
+      }
+    }
+  }
+
+  // css and js
+  drupal_add_css(drupal_get_path('module', 'tm_newsfeed_updates') . '/css/toasty.min.css');
+  drupal_add_js(drupal_get_path('module', 'tm_newsfeed_updates') . '/js/toasty.min.js');
+
+  // don't check timestamp if logged out (due to cache)
+  $latest_timestamp = 0;
+
+  // if user is logged in, use cookie timestamp if activity in past 15 minutes
+  if (user_is_logged_in()) {
+  
+    // get latest timestamp
+    $latest_timestamp = tm_newsfeed_updates_latest_timestamp();
+
+    $cookie_timestamp = 0;
+    if (isset($_COOKIE["Drupal_visitor_newsfeed_updates_timestamp"])) {
+      $cookie_timestamp = intval($_COOKIE["Drupal_visitor_newsfeed_updates_timestamp"]);
+    }
+
+    if (($latest_timestamp - $cookie_timestamp) < (60 * 15)) {
+      $latest_timestamp = $cookie_timestamp;
+    }
+  }
+
+  // add js
+  drupal_add_js("var tm_newsfeed_updates_do_poll = true;
+      var tm_newsfeed_updates_timeout;
+      var tm_newsfeed_updates_html = null;
+
+      (function ($, Drupal, window, document, undefined) {
+
+      jQuery(document).ready(function() { 
+
+        window.addEventListener('focus', function(event) {
+          tm_newsfeed_updates_do_poll = true;
+          clearTimeout(tm_newsfeed_updates_timeout);
+          tm_newsfeed_updates_timeout = setTimeout(function() { jQuery.getScript('/newsfeed/poll_notifications?timestamp=focus'); }, " . $focus_delay . ");
+        });
+
+        window.addEventListener('blur', function(event) {
+          tm_newsfeed_updates_do_poll = false;
+          clearTimeout(tm_newsfeed_updates_timeout);
+        });
+
+        var tm_newsfeed_updates_timeout = setTimeout(function() { 
+          jQuery.getScript('/newsfeed/poll_notifications?timestamp=" . $latest_timestamp . "');
+        }, " . $initial_delay . ");
+
+      });
+      })(jQuery, Drupal, this, this.document);", array('type' => 'inline', 'scope' => 'footer'));
+
+}
+
+/**
+ * Get notifications
+ */
+
+function tm_newsfeed_updates_poll_notifications() {
+
+  global $user;
+  global $conf;
+  $js = "";
+
+  // page not cacheable
+  drupal_page_is_cacheable(false);
+
+  // default
+  $display_duration = $conf["tm_newsfeed_updates_display_duration"];
+  $refresh_interval = $conf["tm_newsfeed_updates_refresh_interval"];
+  $show_unapproved = $conf["tm_newsfeed_updates_show_unapproved"];
+
+  // adjust for anonymous user
+  if (!user_is_logged_in()) {
+    $display_duration = $display_duration * 2;
+    $refresh_interval = $refresh_interval * 2;
+  }
+
+  // fetch timestamp from ?timestamp
+  $timestamp = 0;
+  if (isset($_GET["timestamp"])) {
+    if ($_GET["timestamp"] != 0) {
+      $timestamp = intval($_GET["timestamp"]);
+    }
+  }
+
+  // set to cookie value if focus, if user is logged in
+  if ($timestamp == 'focus') {
+    if (isset($_COOKIE["Drupal_visitor_newsfeed_updates_timestamp"])) {
+      $timestamp = intval($_COOKIE["Drupal_visitor_newsfeed_updates_timestamp"]);
+    } else {
+      $timestamp = 0;
+    }
+  }
+
+  // don't let timestamp be set to future
+  $latest_timestamp = tm_newsfeed_updates_latest_timestamp();
+  if ($timestamp > $latest_timestamp) {
+    $timestamp = $latest_timestamp;
+  }
+
+  // if timestamp is zero, set to latest
+  if ($timestamp == 0) {
+    $timestamp = $latest_timestamp;
+  }
+
+  // get last 10 results
+  $results = tm_newsfeed_updates_get_combined_feed_global($timestamp, $user->uid, 10);
+ 
+  // try to render a result
+  $html = "";
+  $new_timestamp = $timestamp;
+  foreach($results as $result) {
+      if ($html == "") {
+        $html = tm_newsfeed_updates_render_flagged_item($result, true, $show_unapproved);
+        $new_timestamp = $result->timestamp;
+      }
+  }
+
+  // turn off sound on event pages
+  $tm_newsfeed_updates_sound = $conf["tm_newsfeed_updates_sound"];
+  if (isset($_SERVER['HTTP_REFERER'])) {
+    $referer = $_SERVER['HTTP_REFERER'];
+    if (strpos($referer, "events/") !== false) {
+      $tm_newsfeed_updates_sound = "false";
+    }
+  }
+
+  // show update
+  if ($html != "") {  
+    $html = str_replace("\n", "", $html);
+    $js .= "var toasty_html = '" . $html . "'; var toast = new Toasty({autoClose: true, progressBar: " . $conf["tm_newsfeed_updates_progress_bar"] . ", transition: 'slideLeftFade', sounds: { info: '" . $conf["tm_newsfeed_updates_sound_file"] . "' }, enableSounds: " . $tm_newsfeed_updates_sound . ", duration: " . $display_duration . "}); if (toasty_html != tm_newsfeed_updates_html) { toast.info(toasty_html); tm_newsfeed_updates_html = toasty_html; }; ";
+  }
+
+  // set refresh interval
+  $js .= "if (tm_newsfeed_updates_do_poll) { tm_newsfeed_updates_timeout = setTimeout(function() { jQuery.getScript('/newsfeed/poll_notifications?timestamp=" . $new_timestamp . "')}, " . $refresh_interval . "); }";
+
+  // set timestamp cookie for logged in users
+  if (user_is_logged_in()) {
+    setcookie("Drupal.visitor.newsfeed_updates_timestamp", $new_timestamp, strtotime('+30 days'), "/", "." . $conf["tm_email_server_url_domain"]);
+  }
+
+  echo $js;
+}
+
+/**
+ * Get the latest flagging timestamp
+ */
+function tm_newsfeed_updates_latest_timestamp() {
+
+  $query = "SELECT timestamp FROM flagging ORDER BY timestamp DESC LIMIT 1";
+  $result = db_query($query)->fetch();
+  $latest_timestamp = $result->timestamp;
+  return $latest_timestamp;
+
+}
+
+  

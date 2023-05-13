@@ -1,0 +1,370 @@
+<?php
+/**
+ * @file
+ * Code for the TM Reports feature.
+ */
+
+include_once 'tm_reports.features.inc';
+include_once 'tm_reports.drush.inc';
+include_once 'tm_reports.global.inc';
+include_once 'tm_reports.chapter.inc';
+include_once 'tm_reports.event.inc';
+include_once 'tm_reports.helpers.inc';
+include_once 'tm_reports.display.inc';
+include_once 'tm_reports.csv.inc';
+
+/**
+ * Hook_menu()
+ */
+function tm_reports_menu() {
+
+   $items = array();
+
+   $items['chapters/%/insights'] = array(
+    'title' => 'Chapter insights',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('tm_reports_chapter_insights'),
+    'access callback' => 'tm_reports_chapter_insights_check_permission',
+    'type' => MENU_CALLBACK,
+   );
+
+   $items['admin/global_insights'] = array(
+    'title' => 'Global insights',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('tm_reports_global_insights'),
+    'access callback' => 'tm_reports_user_is_moderator',   
+    'access arguments' => array(1),
+    'type' => MENU_CALLBACK,
+   );
+
+   $items['node/%/unapproved-members'] = array(
+    'title' => tm_users_get_unapproved_member_label("plural"),
+    'page callback' => 'tm_reports_unapproved_members_redirect',
+    'page arguments' => array(1),
+    'access arguments' => array('approve users'),
+    'type' => MENU_CALLBACK,
+   );
+
+   $items['node/%/chapter-insights'] = array(
+    'title' => t('Chapter insights'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('tm_reports_event_insights'),
+    'access callback' => 'tm_reports_event_insights_check_permission',
+    'type' => MENU_CALLBACK,
+   );
+
+   $items['events/insights/%'] = array(
+    'title' => 'Event insights',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('tm_reports_event_insights'),
+    'access callback' => 'tm_reports_event_insights_check_permission',
+    'type' => MENU_CALLBACK,
+   );
+
+   $items['admin/export_chapter_insights'] = array(
+    'title' => 'Export all chapter insights',
+    'page callback' => 'tm_reports_download_chapter_insights_csv',
+    'page arguments' => array(1),
+    'access callback' => 'tm_reports_user_is_moderator',
+    'type' => MENU_CALLBACK,
+   );
+
+   return $items;
+}
+
+/** 
+ * Redirect from chapter reports to clean URL for unapproved members
+ */
+function tm_reports_unapproved_members_redirect($nid) {
+  $chapter = node_load($nid);
+  $redirect_url = drupal_get_path_alias("node/" . $nid) . "/unapproved-members";
+  drupal_goto("/" . $redirect_url);
+}
+
+/**
+ * Implements hook_views_query_alter().
+ */
+function tm_reports_views_query_alter(&$view, &$query) {
+ if ($view->current_display == 'chapters_report' || $view->current_display == 'chapters_report_export') {
+  _tm_reports_views_query_alter_chapter_report($view, $query);
+ }
+
+ if ($view->current_display == 'industry_report' || $view->current_display == 'industry_report_export') {
+  _tm_reports_views_query_alter_industry_report($view, $query);
+ }
+}
+
+/**
+* Implements hook_views_pre_render().
+*/
+function tm_reports_views_pre_render(&$view) {
+  if ($view->current_display == 'chapters_report' || $view->current_display == 'chapters_report_export') {
+    _tm_reports_views_pre_render_chapter_report($view);
+  }
+
+  if ($view->current_display == 'industry_report' || $view->current_display == 'industry_report_export') {
+    _tm_reports_views_pre_render_industry_report($view);
+  }
+}
+
+/* Modify chapter report view query */
+function _tm_reports_views_query_alter_chapter_report(&$view, &$query) {
+
+  // Rewrite JOIN Date of Last Event and Time Ago (field_data_field_event_date table).
+  $join = new views_join;
+  $join->construct('field_data_field_event_date', 'field_chapter_node', 'nid', 'entity_id', array(), 'LEFT');
+  $join->extra = array(
+    array(
+        'field' => 'entity_type',
+        'value' => 'node',
+    ),
+    array(
+        'field' => 'deleted',
+        'value' => '0',
+    ),
+    array(
+        'field' => 'field_event_date_value',
+        'operator' => '>=',
+        'value' => date('Y-m-d', strtotime('-1 year')),
+    ),
+    array(
+        'field' => 'field_event_date_value',
+        'operator' => '<',
+        'value' => date('Y-m-d'),
+    )   
+  );
+  $query->add_relationship('field_chapter_node__field_data_field_event_date', $join, 'node');
+  
+  /* Rewrite community managers JOIN */
+  $join = new views_join;
+  $join->construct('field_data_field_community_managers', 'node', 'nid', 'entity_id', array(), 'LEFT');
+   $join->extra = array(
+    array(
+        'field' => 'entity_type',
+        'value' => 'node',
+    ),
+    array(
+        'field' => 'deleted',
+        'value' => '0',
+    ),
+    /* Add new condition */
+    array(
+        'field' => 'entity_id',
+        'value' => 'field_chapter_node__field_data_field_event_date.entity_id',
+    )
+  );
+  $query->add_relationship('field_data_field_community_managers', $join, 'field_data_field_community_managers');
+
+  /* JOIN next event date */
+  $join = new views_join;
+  $join->construct('field_data_field_event_date', 'field_chapter_node', 'nid', 'entity_id', array(), 'LEFT');
+  $join->extra = array(
+    array(
+        'field' => 'entity_type',
+        'value' => 'node',
+    ),
+    array(
+        'field' => 'deleted',
+        'value' => '0',
+    ),
+    array(
+        'field' => 'field_event_date_value',
+        'operator' => '>',
+        'value' => date('Y-m-d', strtotime('now')),
+    )
+  );
+  $query->add_relationship('field_chapter_node__field_data_field_next_event_date', $join, 'node');
+  $query->fields['field_chapter_node__field_data_field_event_date_field_event__3']['table'] = 'field_chapter_node__field_data_field_next_event_date';
+  
+  /* Add nid field of the next event (need in the link) */
+  $query->add_field(null, 'field_chapter_node__field_data_field_next_event_date.entity_id', 'next_event_date_entity_id', array('function' => 'max')); 
+}
+
+/* Modify industry report view query */
+function _tm_reports_views_query_alter_industry_report(&$view, &$query) {
+
+  $industry_field = array();
+  $v = taxonomy_vocabulary_machine_name_load("tm_segments");
+  $terms = taxonomy_get_tree($v->vid, 0, 1); // get top level taxonomy
+  foreach ($terms as $term) {
+    // ie: $industry_field['846'] = 'tid_846';
+    $industry_field[$term->tid] = 'tid_' . $term->tid;
+  }
+  
+  foreach ($industry_field as $tid => $field_alias) {
+    $join = _tm_reports_add_join_industry($field_alias, $tid);
+    $query->add_relationship('th_'.$field_alias, $join, 'field_data_field_segment');
+    $query->add_field('th_'.$field_alias, 'tid', $field_alias, array('function' => 'count'));
+  }
+
+  /* Add field_count for fix industry count in hook_views_pre_render */
+  $query->add_field(null, 'DISTINCT(field_chapter_node.nid)', 'field_count', array('function' => 'count'));
+}
+
+/* Modify industry report view pre render */
+function _tm_reports_views_pre_render_industry_report(&$view) {
+
+  $segment_label = "Industry Segment";
+  if (isset($conf["tm_segment_label"])) {
+    $segment_label = $conf["tm_segment_label"];
+  }
+
+  /* Create custom column for the Industry Segment */
+  $table = 'taxonomy_term_hierarchy';
+  $table_alias = 'th';
+  $real_field = 'tid';
+
+  $industry_field = array();
+  $v = taxonomy_vocabulary_machine_name_load("tm_segments");
+  $terms = taxonomy_get_tree($v->vid, 0, 1); // get top level taxonomy
+  foreach ($terms as $term) {
+    // ie: $industry_field['846'] = 'Accommodation';
+    $industry_field["tid_" . $term->tid] = $term->name;
+  }
+
+  $view->field["total_has_industry_pct"] = _tm_reports_add_handler_field_numeric($view, $table, $table_alias, $real_field, "total_has_industry_pct", "Has " . $segment_label . " (%)");
+
+  /* Count */
+  foreach ($industry_field as $field_alias => $label) {
+      $view->field[$field_alias] = _tm_reports_add_handler_field_numeric($view, $table, $table_alias, $real_field, $field_alias, $label);  
+  }
+
+  /* Percentage */
+  foreach ($industry_field as $field_alias => $label) {
+      $field_alias .= '_pct';
+      $label .= ' (%)'; 
+      $view->field[$field_alias] = _tm_reports_add_handler_field_numeric($view, $table, $table_alias, $real_field, $field_alias, $label);        
+  }
+
+  // Fix Count for Industry Segment term
+  foreach ($view->result as $i => $result) {
+
+    // Step 1. count number of members with a segment
+    $members_with_segment = 0;
+    foreach ($industry_field as $field_alias => $label) {
+      if (is_numeric($i) && (!empty($view->field[$field_alias]->view->result[$i]->$field_alias))) {
+        $field_count = ($view->field[$field_alias]->view->result[$i]->field_count);
+        $count = ($view->field[$field_alias]->view->result[$i]->$field_alias);
+        $count_normalise = ($field_count != 0 ? $count / $field_count : $count);
+        $members_with_segment += $count_normalise;     
+      }
+    }
+
+    // correct field value. note: this is horrible code, but what can we do as we are wrangling with views :(
+    $view->result[$i]->users_flagging__field_data_field_segment_field_segment_tid = $members_with_segment;
+
+    // Step 2. Calculate % and update count
+    foreach ($industry_field as $field_alias => $label) {
+      if (is_numeric($i) && (!empty($view->field[$field_alias]->view->result[$i]->$field_alias))) {
+        $field_count = ($view->field[$field_alias]->view->result[$i]->field_count);
+        $count = ($view->field[$field_alias]->view->result[$i]->$field_alias);
+        $count_normalise = ($field_count != 0 ? $count / $field_count : $count);
+        $view->field[$field_alias]->view->result[$i]->$field_alias = $count_normalise;
+          
+        /* Percentage */
+        $field_alias .= '_pct';
+        //$total = $view->result[$i]->flag_counts_node_count;
+        $pct = round(($count_normalise * 100 / $members_with_segment), 1);
+        $view->field[$field_alias]->view->result[$i]->$field_alias = $pct;          
+      }
+    }
+
+    // Step 3. Update total %
+    //$approved_members = $view->field["total_has_industry_pct"]->view->result[$i]->total_has_industry_pct
+    $approved_members = $view->result[$i]->flag_counts_node_count;
+    $total_has_industry_pct = round($members_with_segment * 100 / $approved_members, 0);
+    $view->field["total_has_industry_pct"]->view->result[$i]->total_has_industry_pct = $total_has_industry_pct;
+
+  }
+}
+
+/**
+* Helper function _tm_reports_add_handler_field_numeric
+*/
+function _tm_reports_add_handler_field_numeric(&$view, $table, $table_alias, $real_field, $field_alias, $label) {
+  $field = new views_handler_field_numeric();
+  $field ->field_alias =  $field_alias;
+  $field ->aliases =  array();
+  $field ->original_value =  NULL;
+  $field ->additional_fields =  array();
+  $field ->view =  &$view;
+  $field ->query =  &$view->query;
+  $field ->handler_type =  'field';
+  $field ->table_alias =  $table_alias;
+  $field ->real_field =  $real_field;
+  $field ->relationship =  NULL;
+  $field ->options = array(
+    'id' => 'count',
+    'table' => $table,
+    'field' => 'count',
+    'relationship' => $table_alias,
+    'group_type' => 'group',
+    'ui_name' => '',
+    'label' => $label,
+    'exclude' => FALSE,
+    'alter'  => array(
+      'alter_text' => FALSE,
+      'text' => '',
+      'make_link' => FALSE,
+      'path' => '',
+      'absolute' => FALSE,
+      'external' => FALSE,
+      'replace_spaces' => FALSE,
+      'path_case' => 'none',
+      'trim_whitespace' => FALSE,
+      'alt' => '',
+      'rel' => '',
+      'link_class' => '',
+      'prefix' => '',
+      'suffix' => '',
+      'target' => '',
+      'nl2br' =>  FALSE,
+      'max_length' => '',
+      'word_boundary' =>  TRUE,
+      'ellipsis' => TRUE,
+      'more_link' => FALSE,
+      'more_link_text' => '',
+      'more_link_path' => '',
+      'strip_tags' =>  FALSE,
+      'trim' => FALSE,
+      'preserve_tags' => '',
+      'html' => FALSE,
+    ),
+    'element_type' => '',
+    'element_class' => '',
+    'element_label_type' => '',
+    'element_label_class' => '',
+    'element_label_colon' => TRUE,
+    'element_wrapper_type' => '',
+    'element_wrapper_class' => '',
+    'element_default_classes' => TRUE,
+    'empty' => '',
+    'hide_empty' => FALSE,
+    'empty_zero' => FALSE,
+    'hide_alter_empty' => TRUE,
+    'set_precision'  => FALSE,
+    'precision' =>  0,
+    'decimal' => '.',
+    'separator' => ',',
+    'format_plural' => FALSE,
+    'format_plural_singular' => 1,
+    'format_plural_plural' => '@count',
+    'prefix' => '',
+    'suffix' => '',
+  );
+  
+  $field ->definition =  array(
+    'handler' => 'views_handler_field_numeric',
+    'click sortable' => TRUE,
+    'group' => 'Field',
+    'title' => $label,
+    'help' => '',
+  );
+  
+  $field ->is_handler =  TRUE;
+  $field ->table =  $table;
+  $field ->field =  $real_field;
+  $field ->position = 0;
+  
+  return $field;
+}

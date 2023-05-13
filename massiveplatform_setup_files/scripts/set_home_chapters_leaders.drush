@@ -1,0 +1,96 @@
+#!/usr/bin/env drush
+
+# Simple script to set home chapter for chapter leaders without a home chapter
+
+# Confirm
+$confirm = false;
+$confirm_opt = drush_get_option('confirm');
+if ($confirm_opt == null) {
+	drush_print("Running simulation (not saving). Use --confirm to save account changes.");
+} else {
+	$confirm = true;
+}
+
+// get chapter leader role
+$role = user_role_load_by_name("chapter leader");
+
+// fetch all users
+$results = db_query('SELECT users.uid FROM {users} INNER JOIN users_roles ON users_roles.uid = users.uid AND users_roles.rid = ' . $role->rid . ' WHERE users.uid > 0 ORDER BY uid')->fetchAll();
+
+// process each user
+$count = 0;
+$count_change_leader = 0;
+$count_change_member = 0;
+
+drush_print("Processing " . sizeof($results) . " users...");
+foreach ($results as $result) {
+
+	$count++;
+
+	// get uid
+	$user_id = $result->uid;
+
+	// load user
+	$account = user_load($user_id);
+
+	// only work on chapter leaders
+	if (in_array("chapter leader", $account->roles) != true) {
+		continue;
+	}
+
+	// If chapter leader, fetch list of chapters the user is a leader of
+	$chapters_leader_nids = array();
+	// Fetch list of chapters the user is a leader of
+	$query = new EntityFieldQuery();
+	$query->entityCondition('entity_type', 'node')
+	->entityCondition('bundle', 'chapter')
+	->propertyCondition('status', NODE_PUBLISHED)
+	->fieldCondition('field_chapter_leaders', 'target_id', $account->uid, '=');
+
+	$result = $query->execute();
+	if (isset($result['node'])) {
+		$chapters_leader_nids = array_keys($result['node']);
+	}
+
+	// If is a chapter leader, set first chapter (regardless if they have another home chapter)
+	if (sizeof($chapters_leader_nids) > 0) {
+
+		// Fetch list of chapters the user has joined
+		$flags = flag_get_user_flags("node", null, $user_id);
+		$chapters_nids = array();
+		foreach ($flags as $flag_name => $flag) {
+			if ($flag_name == "signup") {
+				foreach($flag as $f) {
+					$chapters_nids[] = $f->entity_id;
+				}
+			}
+		}
+
+		$previous_home_chapter = "none";
+		if (sizeof($account->field_home_chapter) > 0) {
+			$previous_home_chapter = $account->field_home_chapter[LANGUAGE_NONE][0]['target_id'];
+		}
+
+		$change_text = "";
+		if ($previous_home_chapter != $chapters_leader_nids[0]) {
+			$change_text = " [CHANGED]";
+		}
+
+		$account->field_home_chapter[LANGUAGE_NONE][0]['target_id'] = $chapters_leader_nids[0];
+		drush_print("User: " . $user_id . " is chapter leader, setting home chapter to " . $chapters_leader_nids[0] . " (member of " . sizeof($chapters_nids) . " chapters, previous home chapter: " . $previous_home_chapter . ")" . $change_text);
+		if ($confirm) {
+			// call field_attach_update so we don't trigger user_update hooks
+			field_attach_update('user', $account);
+		}
+		$count_change_leader++;
+		continue;
+	}
+
+	drush_print("User: " . $user_id . " is chapter leader, but has no chapters.");
+	continue;
+
+}
+
+drush_print("Updated " . $count_change_leader . " chapter leaders...");
+drush_print("Done.");
+

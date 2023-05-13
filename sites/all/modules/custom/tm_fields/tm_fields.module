@@ -1,0 +1,1163 @@
+<?php
+/**
+ * @file
+ * Code for the TM Fields feature.
+ */
+
+include_once 'tm_fields.features.inc';
+
+// Field menus for _tm_more_actions_process()
+include_once 'tm_fields.menu_sharing.inc';
+include_once 'tm_fields.menu_edit.inc';
+include_once 'tm_fields.menu_user.inc';
+include_once 'tm_fields.menu_organization.inc';
+include_once 'tm_fields.menu_event.inc';
+include_once 'tm_fields.menu_chapter.inc';
+include_once 'tm_fields.menu_moderator.inc';
+include_once 'tm_fields.menu_user_subscriptions.inc';
+include_once 'tm_fields.menu_lists.inc';
+
+/**
+ * Implement hook_ds_field_info
+ */
+function tm_fields_ds_fields_info($entity_type) {
+  $fields = array();
+
+  $fields['tm_ds_content_type'] = array(
+    'title' => t('Content type'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('*|search_result', 'user|*'),
+    'function' => '_tm_content_type_process'
+  );
+
+  $fields['tm_ds_chapter_sticker'] = array(
+    'title' => t('Chapter sticker'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('event|*', 'user|*'),
+    'function' => '_tm_chapter_sticker_process'
+  );
+
+  $fields['tm_ds_approved'] = array(
+    'title' => t('Approval status'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('user|*'),
+    'function' => '_tm_approved_process'
+  );
+
+  $fields['tm_ds_more_actions'] = array(
+    'title' => t('More actions'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('*|*'),
+    'function' => '_tm_more_actions_process'
+  );
+
+  $fields['tm_ds_communication_actions'] = array(
+    'title' => t('Communication actions'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('*|*'),
+    'function' => '_tm_communication_actions_process'
+  );
+  
+  $fields['tm_ds_anon_flag_placeholder'] = array(
+    'title' => t('Anonymous flag placeholder'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('*|*'),
+    'function' => '_tm_anon_flag_placeholder'
+  );
+
+  $fields['tm_ds_edit_own_profile'] = array(
+    'title' => t('Edit own profile button'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('user|*'),
+    'function' => '_tm_edit_own_profile_process',
+    'properties' => array(
+      'settings' => array(
+        'Extra classes' => array(
+          'type' => 'textfield',
+          'description' => t('Classes for the link')
+        )
+      ),
+      'default' => array(
+        'Extra classes' => ''
+      )
+    ),
+  );
+
+  $fields['tm_ds_connection_actions'] = array(
+    'title' => t('Connection Actions'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('user|*'),
+    'function' => 'tm_fields_connection_actions',
+    'properties' => array(
+      'settings' => array(
+        'Extra classes' => array(
+          'type' => 'textfield',
+          'description' => t('Classes for the link')
+        )
+      )
+    )
+  );
+
+  // provided by tm_track_views
+  $fields['tm_ds_track_viewers'] = array(
+    'title' => t('Who viewed my profile'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('user|*'),
+    'function' => '_tm_ds_track_viewers_wrapper'
+  );
+
+  // provided by tm_track_views
+  $fields['tm_ds_track_company_viewers'] = array(
+    'title' => t('Who viewed my company page'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('organization|*'),
+    'function' => '_tm_ds_track_viewers_wrapper'
+  );
+  
+  return array($entity_type => $fields);
+}
+
+/**
+ * Implements hook_ds_field_settings_form().
+ * http://www.elevatedthird.com/blog/advanced-custom-fields-display-suite
+ */
+function tm_fields_ds_field_settings_form($field) {
+  return ds_ds_field_settings_form($field);
+}
+
+/**
+ * Implements hook_ds_field_format_summary().
+ * http://www.elevatedthird.com/blog/advanced-custom-fields-display-suite
+ */
+function tm_fields_ds_field_format_summary($field) {
+  return ds_ds_field_format_summary($field);
+}
+
+/**
+ * Custom function to return the human readable name of the content type
+ */
+function _tm_content_type_process($field, $title = NULL) {
+  if ($field['entity_type'] == 'node') {
+    return node_type_get_name($field['bundle']);
+  }
+  elseif ($field['entity_type'] == 'user') {
+    return t('Member');
+  }
+}
+
+/**
+ * Custom function to build the chapter sticker
+ */
+function _tm_chapter_sticker_process($field, $title = NULL) {
+
+  global $conf;
+  $id = null;
+
+  // field_chapter
+  if (isset($field['entity']->field_chapter['und'][0]['target_id'])) {
+    $id = $field['entity']->field_chapter['und'][0]['target_id'];
+  }
+
+  // field_home_chapter (user)
+  if (isset($field['entity']->field_home_chapter['und'][0]['target_id'])) {
+    $id = $field['entity']->field_home_chapter['und'][0]['target_id'];
+  }
+
+  if ($id != null) {
+    $related_chapter = node_load($id);
+    if ($related_chapter){
+      return theme('tm_chapter_sticker', array(
+        'custom_url' => null,
+        'chapter_id' => $related_chapter->nid,
+        'shortcode' => $related_chapter->field_chapter_shortcode['und'][0]['value'],
+        'color' => $related_chapter->field_chapter_color['und'][0]['rgb'],
+      ));
+    }
+  }
+
+  if ($id == null) {
+
+    // defaults
+    $event_type = null;
+    $event_type_name = "Member Event";
+    $url = url("events");
+
+    // get event type name
+    if (isset($field['entity']->field_event_type['und'][0]['value'])) {
+      $event_type = $field['entity']->field_event_type['und'][0]['value'];
+      if (isset($conf['tm_event_types'][$event_type])) {
+         $event_type_name = $conf['tm_event_types'][$event_type];
+      } 
+    }
+
+    // member event
+    if ($event_type == "member" || $event_type == "all") {
+      $url = url("user/" . $field['entity']->uid);
+    }
+
+    // company event
+    if ($event_type == "company") {
+      $url = url("events/list/company");
+      if (isset($field['entity']->field_event_company['und'][0]['target_id'])) {
+        $company_id = $field['entity']->field_event_company['und'][0]['target_id'];
+        $url = url("node/" . $company_id);
+        $company = node_load($company_id);
+        if ($company != null) {
+          $event_type_name = strip_tags(trim($company->title));
+            if (strlen($event_type_name) > 35) {
+            $event_type_name = substr($event_type_name, 0, 35) . "...";
+          }
+        }
+      }
+    }
+
+    // conference event
+    if ($event_type == "conference") {
+      $url = url("events/list/conference");
+    }
+
+    // don't show community (chapter) event badge
+    if ($event_type == "community") {
+      $event_type = null;
+    }
+   
+    if ($event_type != null) {
+      return theme('tm_chapter_sticker', array(
+        'custom_url' => $url,
+        'chapter_id' => null,
+        'shortcode' => $event_type_name,
+        'color' => $conf["tm_event_types_sticker_icon_color"]
+      ));
+    }
+
+  }
+}
+
+/**
+ * Custom function to build the approved status
+ */
+function _tm_approved_process($field, $title = NULL) {
+
+  global $conf;
+  global $user;
+
+  // default unapproved
+  $approval = "notapproved";
+  $approval_text = tm_users_get_unapproved_member_label();
+
+  // approved
+  if (in_array("approved user", $field['entity']->roles)){
+    $approval = "approved";
+    $approval_text = tm_users_get_approved_member_label();
+  }
+
+  // subscriber
+  if (in_array("subscriber", $field['entity']->roles)){
+    $approval = "subscriber";
+    $approval_text = "Pro Member";
+  }
+
+  // so small it's not really worth a tpl
+  $html = '<p class="approval"><span class="text_'.$approval.'">'.$approval_text.'</span></p>';
+
+  // if user is looking at their own profile and its unapproved, show them approval link
+  if (($approval == "notapproved") and ($field['entity']->uid == $user->uid))  {
+
+    // show last time request info was flagged
+    $loaded = user_load($user->uid);
+    $who_flagged = flag_get_entity_flags("user", $loaded->uid, "approval_requested_by_user");
+    if (sizeof($who_flagged) > 0) {
+      foreach ($who_flagged as $flagger) {
+        $difference = time() - $flagger->timestamp;
+      }
+      $flagged_time = format_interval($difference, 1) . " ago";
+
+      // 1. Show approval requested link
+      $approval_link = l('Requested verification (' . $flagged_time . ')', 'javascript:jq_approval_already_requested();', array('fragment' => '','external'=>true));
+      $html .= '<span class="approval_pending" style="font-size: 10pt;">' . $approval_link . '</span>';
+
+    } else {
+
+      // 2. Show "Verify my account" link
+      $approval_link = l('Request verification', 'javascript:jq_request_approval(' . $loaded->uid . ')', array('fragment' => '','external'=>true, 'attributes' => array('class' => array('approval-link'))));
+
+      $html .= '<span class="approval" style="font-size: 10pt;">' . $approval_link . '</span>';
+    }
+  }
+
+  return $html;
+}
+
+/**
+ * Custom function to build the communication actions menu
+ */
+function _tm_communication_actions_process($field, $title = NULL) {
+
+  global $base_root, $user;
+  global $conf;
+  $base = $base_root . request_uri();
+  $links = array(
+    'edition' => array(),
+  );
+
+  $show_menu = false;
+
+  $menu_item = menu_get_item();
+
+  // START Contact chapter owners.
+  if (isset($menu_item['page_arguments'][0]->nid)) {
+    
+    $node = menu_get_object();
+
+    if ($node->type == 'chapter') {
+      
+      $dest = $node->nid;
+     
+      if ($dest) {
+        $show_menu = true;
+
+        $current_uri = request_uri();
+        $current_uri = substr($current_uri, 1); // delete first slash
+
+        // chapter invitations
+        $link_path = $current_uri.'/message';
+
+        // check if user logged in
+        if ($user->uid > 0) {
+
+          // if user has been reported, limit messaging
+          $moderate_report_member_flagged = flag_get_entity_flags("user", $user->uid, "moderate_report_member");
+
+          if (sizeof($moderate_report_member_flagged) > 0) {
+
+            // messaging restricted
+            $links['contactleaders'][] = array(
+              'wrapper_class' => array('contactleaders'),
+              'content' => l(t('Message chapter leaders'), 'javascript:jq_alert("Messaging Unavailable", "Sorry, this service is not available.")', array(
+                'external' => true,
+                'attributes' => array(
+                'title' => t('Message chapter leaders')
+                )
+              ))
+            );
+
+          } else {
+
+            // show contact leaders form
+            $links['contactleaders'][] = array(
+              'wrapper_class' => array('contactleaders'),
+              'content' => l(t('Message chapter leaders'), $link_path, array(
+                'attributes' => array(
+                'title' => t('Message chapter leaders')
+                )
+              ))
+            );
+
+          }
+
+        } else {
+
+          // show login box
+          $links['contactleaders'][] = array(
+            'wrapper_class' => array('contactleaders'),
+            'content' => l(t('Message chapter leaders'), 'javascript:jq_login_signup_box();', array(
+              'external' => true,
+              'attributes' => array(
+              'title' => t('Message chapter leaders')
+              )
+            ))
+          );
+        }
+      }
+    }
+  }
+  // END contact chapter owners
+
+  // START Contact event organizers.
+  if (isset($menu_item['page_arguments'][0]->nid)) {
+    
+    $node = menu_get_object();
+    
+    if ($node->type == 'event') {
+
+      $dest = $node->nid;
+     
+      if ($dest) {
+        $show_menu = true;
+
+        // chapter invitations
+        $link_path = 'events/message/' . $node->nid;
+
+        // check if user logged in
+        if ($user->uid > 0) {
+
+          // show contact leaders form
+          $links['contactleaders'][] = array(
+            'wrapper_class' => array('contactorganizers'),
+            'content' => l(t('Message event organizers'), $link_path, array(
+              'attributes' => array(
+              'title' => t('Message event organizers')
+              )
+            ))
+          );
+
+        } else {
+
+          // show login box
+          $links['contactleaders'][] = array(
+            'wrapper_class' => array('contactleaders'),
+            'content' => l(t('Message event organizers'), 'javascript:jq_login_signup_box();', array(
+              'external' => true,
+              'attributes' => array(
+              'title' => t('Message event organizers')
+              )
+            ))
+          );
+        }
+      }
+    }
+  }
+  // END contact event organizers
+
+  // START message member link
+  if ($menu_item['path'] == 'user/%') {
+
+    $uid = $menu_item['page_arguments'][0]->uid;
+    $targetuser = user_load($uid);
+
+    // Only show link for approved users
+    if (in_array("approved user", $user->roles)){
+
+      $send_message_html = tm_messaging_make_send_message_link($user, $targetuser);
+
+      if ($send_message_html != null) {
+        $show_menu = true;
+        $links['messaging'][] = array(
+        'wrapper_class' => array('messaging'),
+        'content' => $send_message_html
+        );
+      }
+    }
+  }
+  // END message member link
+
+  // Don't show menu if there are no communication options
+  if (!$show_menu) { 
+    return null;
+  }
+
+  // Return links
+  return theme('communication_actions', array('links' => $links));
+
+}
+
+
+/**
+ * Custom function to build the more_actions menu
+ */
+function _tm_more_actions_process($field, $title = NULL) {
+  
+  global $conf;
+  global $user;
+  global $base_root;
+
+  $base = $base_root . request_uri();
+  $links = array(
+    'edition' => array(),
+    'share' => array()
+  );
+
+  $menu_item = menu_get_item();
+
+  // get nid
+  $nid = null;
+  if (isset($menu_item['page_arguments'][0]->nid)) {
+    $nid = $menu_item['page_arguments'][0]->nid;
+  }
+
+  // Load current user
+  $currentuser = user_load($user->uid);
+
+  // Target user (who we are viewing)
+  $targetuser = null;
+  if (($menu_item['path'] == 'user/%') or ($menu_item['path'] == 'user/%/view')) {
+    if (isset($menu_item['page_arguments'][0]->uid)){
+      $uid = $menu_item['page_arguments'][0]->uid;
+      $targetuser = user_load($uid);
+    }
+  }
+
+  // Process event menus
+  _tm_more_actions_process_sharing_menu($field, $title, $links, $menu_item, $currentuser, $targetuser, $nid);
+  _tm_more_actions_process_edit_menu($field, $title, $links, $menu_item, $currentuser, $targetuser, $nid);
+  _tm_more_actions_process_user_menu($field, $title, $links, $menu_item, $currentuser, $targetuser, $nid);
+  _tm_more_actions_process_lists_menu($field, $title, $links, $menu_item, $currentuser, $targetuser, $nid);
+  _tm_more_actions_process_event_menu($field, $title, $links, $menu_item, $currentuser, $targetuser, $nid);
+  _tm_more_actions_process_chapter_menu($field, $title, $links, $menu_item, $currentuser, $targetuser, $nid);
+  _tm_more_actions_process_organization_menu($field, $title, $links, $menu_item, $currentuser, $targetuser, $nid);
+  _tm_more_actions_process_user_subscriptions_menu($field, $title, $links, $menu_item, $currentuser, $targetuser, $nid);
+  _tm_more_actions_process_moderator_menu($field, $title, $links, $menu_item, $currentuser, $targetuser, $nid);
+  
+  return theme('more_actions', array('links' => $links));
+}
+
+/**
+ * Custom function to build the more_actions menu
+ */
+function _tm_edit_own_profile_process($field, $title = NULL) {
+  $menu_item = menu_get_item();
+  // Is it a user?
+  if (!isset($menu_item['page_arguments'][0]->nid) && isset($menu_item['page_arguments'][0]->uid)) {
+    global $user;
+    // Extra classes for the link.
+    $classes = $field['formatter_settings']['Extra classes'];
+    $uid = $menu_item['page_arguments'][0]->uid;
+    
+    if ($user->uid == $uid) {
+      $classes = $field['formatter_settings']['Extra classes'];
+      return l(t('Edit'), '/user/' . $uid . '/edit', array(
+        'attributes' => array(
+          'class' => $classes,
+          'title' => t('Edit your profile')
+        ),
+        'fragment' => 'user-profile-options',
+        'external' => TRUE
+      ));
+    }
+  }
+}
+
+/**
+ * Custom function to build the flag placeholder for anonymous users.
+ *
+ * When not logged in, the users should still see the follow / join buttons.
+ * This can't be achieved with flags since flags, normally, don't show up for
+ * anonymous users.
+ * To solve this problem a faux field is created. This filed will be used
+ * throughout the website with a flag like appearence. Upon click will redirect
+ * the users to the login page.
+ * This is a very specific field and will differ according with the content
+ * type being viewed.
+ */
+function _tm_anon_flag_placeholder($field, $title = NULL) {
+
+  global $conf;
+  global $user;
+
+  if (!$user->uid) {
+    $entity = $field['entity'];
+    $css_classes = 'follow bttn bttn-secondary bttn-m';
+    
+    if (isset($entity->pass)) {
+      // Password set, it's a user;
+      return l(t('Follow'), 'javascript:jq_login_signup_box();', array(
+        'external' => true,
+        'attributes' => array(
+          'title' => t('Follow :user', array(':user' => $entity->realname)),
+          'class' => array($css_classes)
+        )
+      ));
+    }
+    
+    // Behaviour based on content type.
+    switch ($entity->type) {
+      case 'chapter':
+        return l(t('Join'), 'javascript:jq_login_signup_box();', array(
+          'external' => true,
+          'attributes' => array(
+            'title' => t('Join :chapter', array(':chapter' => $entity->title)),
+            'class' => array($css_classes)
+          )
+        ));
+        break;
+      case 'organization':
+        $display_upvotes = $conf["tm_organizations_upvote"];
+        $action_text = "Follow";
+        if ($display_upvotes) {
+          $css_classes .= " upvote"; // add upvote css class
+          $num_upvotes = tm_organizations_get_num_followers($entity->nid); // get number of upvotes
+          $action_text = "Upvote";
+          if ($num_upvotes > 0) {
+            $action_text = 'Upvote <span class="btn_upvote_count">' . number_format($num_upvotes) . '</span>';
+          }
+        }
+        return l($action_text, 'javascript:jq_login_signup_box();', array(
+          'html' => true,
+          'external' => true,
+          'attributes' => array(
+            'title' => t('Follow :organization', array(':organization' => $entity->title)),
+            'class' => array($css_classes)
+          )
+        ));
+        break;
+      case 'event':
+        $result = _tm_event_display_flag($entity->nid);
+         
+        // Only show the button for managed events.
+        // The other events will have an external RSVP link.
+        if ($result == 'show_external_rsvp') {
+          return;
+        }
+
+        // Checkout ticket
+        if ($result == 'show_checkout') {
+          $css_classes .= ' disabled';
+
+          // default button labels
+          $ticket_label = "Ticket";
+          if (isset($conf["tm_checkout_event_button_label_ticket"])) {
+            $ticket_label = $conf["tm_checkout_event_button_label_ticket"];
+          }
+          
+          return l($ticket_label, 'javascript:jq_login_signup_box();', array(
+            'external' => true,
+            'attributes' => array(
+            'title' => t('Get Ticket for :event', array(':event' => $entity->title)),
+            'class' => array($css_classes)
+          )
+          ));
+        }
+        
+        // Show register
+        if (($result == 'show_register') or ($result == 'show_not_approved')) {
+
+          $button_text = "Register";
+          if (module_exists("tm_payments")) {
+            if (_tm_payments_is_payment_enabled($entity)) {
+              $button_text = "Buy Ticket";
+            }
+          }
+          $css_classes .= ' disabled';
+          return l(t($button_text), 'javascript:jq_login_signup_box();', array(
+            'external' => true,
+            'attributes' => array(
+            'title' => t('Register for :event', array(':event' => $entity->title)),
+            'class' => array($css_classes)
+          )
+          ));
+        }
+
+        // Show closed
+        if (($result == 'show_closed') or ($result == 'show_feedback')) {
+          $css_classes .= ' disabled';
+          return l(t('Past Event'), 'javascript:jq_login_signup_box();', array(
+          'external' => true,
+          'attributes' => array(
+            'title' => t('Register for :event', array(':event' => $entity->title)),
+            'class' => array($css_classes)
+          )
+          ));
+        }
+
+        // Show waitlist
+        if ($result == 'show_waitlist') {
+          $css_classes .= ' disabled';
+          return l(t('Join Waitlist'), 'javascript:jq_login_signup_box();', array(
+            'external' => true,
+            'attributes' => array(
+            'title' => t('Join waitlist for :event', array(':event' => $entity->title)),
+            'class' => array($css_classes)
+          )
+          ));
+        }
+        
+        break;
+    }
+  }
+}
+
+/**
+ * Implement hook_theme()
+ */
+function tm_fields_theme() {
+  return array(
+    'tm_chapter_sticker' => array(
+      'variables' => array(
+        'chapter_id' => NULL,
+        'shortcode' => NULL,
+        'color' => NULL
+      ),
+      'path' => drupal_get_path('module','tm_fields') . '/templates/fields',
+      'template' => 'tm_chapter_sticker'
+    ),
+    'tm_organization_sticker' => array(
+      'variables' => array(
+        'organization_id' => NULL,
+        'label' => NULL,
+        'color' => NULL
+      ),
+      'path' => drupal_get_path('module','tm_fields') . '/templates/fields',
+      'template' => 'tm_organization_sticker'
+    ),
+    'more_actions' => array(
+      'variables' => array(
+        'links' => array()
+      ),
+      'path' => drupal_get_path('module','tm_fields') . '/templates/fields',
+      'template' => 'tm_more_actions'
+    ),
+    'communication_actions' => array(
+      'variables' => array(
+        'links' => array()
+      ),
+      'path' => drupal_get_path('module','tm_fields') . '/templates/fields',
+      'template' => 'tm_communication_actions'
+    ),
+    'tm_fields_link' => array(
+      'variables' => array(
+        'title' => NULL,
+        'url' => NULL,
+      ),
+      'path' => drupal_get_path('module','tm_fields') . '/templates/fields',
+      'template' => 'tm_fields_link',
+    ),
+    'tm_fields_facebook' => array(
+      'variables' => array(
+        'title' => NULL,
+        'url' => NULL,
+      ),
+      'path' => drupal_get_path('module','tm_fields') . '/templates/fields',
+      'template' => 'tm_fields_facebook',
+    ),
+    'tm_fields_linkedin' => array(
+      'variables' => array(
+        'title' => NULL,
+        'url' => NULL,
+      ),
+      'path' => drupal_get_path('module','tm_fields') . '/templates/fields',
+      'template' => 'tm_fields_linkedin',
+    ),
+    'tm_fields_twitter' => array(
+      'variables' => array(
+        'title' => NULL,
+        'url' => NULL,
+      ),
+      'path' => drupal_get_path('module','tm_fields') . '/templates/fields',
+      'template' => 'tm_fields_twitter',
+    ),
+    'tm_fields_instagram' => array(
+      'variables' => array(
+        'title' => NULL,
+        'url' => NULL,
+      ),
+      'path' => drupal_get_path('module','tm_fields') . '/templates/fields',
+      'template' => 'tm_fields_instagram',
+    ),
+    'tm_fields_youtube' => array(
+      'variables' => array(
+        'title' => NULL,
+        'url' => NULL,
+      ),
+      'path' => drupal_get_path('module','tm_fields') . '/templates/fields',
+      'template' => 'tm_fields_youtube',
+    ),
+    'tm_fields_vimeo' => array(
+      'variables' => array(
+        'title' => NULL,
+        'url' => NULL,
+      ),
+      'path' => drupal_get_path('module','tm_fields') . '/templates/fields',
+      'template' => 'tm_fields_vimeo',
+    ),
+    'tm_fields_snapchat' => array(
+      'variables' => array(
+        'title' => NULL,
+        'url' => NULL,
+      ),
+      'path' => drupal_get_path('module','tm_fields') . '/templates/fields',
+      'template' => 'tm_fields_snapchat',
+    ),
+    'tm_fields_strava' => array(
+      'variables' => array(
+        'title' => NULL,
+        'url' => NULL,
+      ),
+      'path' => drupal_get_path('module','tm_fields') . '/templates/fields',
+      'template' => 'tm_fields_strava',
+    ),
+    'tm_fields_tiktok' => array(
+      'variables' => array(
+        'title' => NULL,
+        'url' => NULL,
+      ),
+      'path' => drupal_get_path('module','tm_fields') . '/templates/fields',
+      'template' => 'tm_fields_tiktok',
+    ),
+    'tm_fields_instant_messaging' => array(
+      'variables' => array(
+        'title' => NULL,
+        'url' => NULL,
+      ),
+      'path' => drupal_get_path('module','tm_fields') . '/templates/fields',
+      'template' => 'tm_fields_instant_messaging',
+    ),
+  );
+}
+
+/**
+ * Implementation of hook_ctools_plugin_directory().
+ */
+function tm_fields_ctools_plugin_directory($module, $plugin) {
+  if ($module == 'field_validation' && $plugin == 'validator') {
+    return 'plugins/' . $plugin;
+  }
+  if ($module == 'entityreference') {
+    return 'plugins/entityreference_' . $plugin;
+  }
+}
+
+/**
+* Implements hook_field_formatter_info().
+* see: See more at: http://www.whenwhowhere.com/tech-blog/create-custom-field-formatter-drupal-7#sthash.pf9Fsjzp.dpuf
+*/
+function tm_fields_field_formatter_info() {
+  $info = array(
+    'tm_fields_link' => array(
+      'label' => t('TM Link'), 
+      'field types' => array('link_field'),
+      'description' => t('Diplays URL without http:// prefix'),
+    ),
+    'tm_fields_twitter' => array(
+      'label' => t('TM Twitter'), 
+      'field types' => array('link_field'),
+      'description' => t('Diplays a Twitter URL from an @ or # name'),
+    ),
+    'tm_fields_facebook' => array(
+      'label' => t('TM Facebook'), 
+      'field types' => array('link_field'),
+      'description' => t('Diplays a Facebook URL'),
+    ),
+    'tm_fields_linkedin' => array(
+      'label' => t('TM LinkedIn'), 
+      'field types' => array('link_field'),
+      'description' => t('Diplays a LinkedIn URL'),
+    ),
+    'tm_fields_instagram' => array(
+      'label' => t('TM Instagram'), 
+      'field types' => array('link_field'),
+      'description' => t('Diplays an Instagram URL from an @ or # name'),
+    ),
+    'tm_fields_youtube' => array(
+      'label' => t('TM YouTube'), 
+      'field types' => array('link_field'),
+      'description' => t('Diplays a YouTube URL from a URL or channel name'),
+    ),
+    'tm_fields_vimeo' => array(
+      'label' => t('TM Vimeo'), 
+      'field types' => array('link_field'),
+      'description' => t('Diplays a Vimeo URL from a URL or user name'),
+    ), 
+    'tm_fields_snapchat' => array(
+      'label' => t('TM Snapchat'), 
+      'field types' => array('link_field'),
+      'description' => t('Diplays a Snapchat URL from a user name'),
+    ),
+    'tm_fields_strava' => array(
+      'label' => t('TM Strava'), 
+      'field types' => array('link_field'),
+      'description' => t('Diplays a Strava URL from a user name'),
+    ),
+    'tm_fields_tiktok' => array(
+      'label' => t('TM TikTok'), 
+      'field types' => array('link_field'),
+      'description' => t('Diplays a TikTok URL from a user name'),
+    ),
+  );
+  return $info;
+}
+
+/* 
+ * Helper method return full URL
+ * Note: you should sanitize urls returned from this method before displaying them
+ */
+function _tm_fields_full_url($item, $allow_queries = true) {
+
+  // Note: as of link-7.x-1.4:
+  // - the full url is in the item
+  // - non-http links have a leading / added
+  // - social links are htmlentities ie: @ = %40
+
+  $full_url = $item['url'];
+  
+  // replace %40 with @ symbol (for social links)
+  $full_url = str_replace("%40", "@", $full_url);
+
+  // remove any leading / or ?
+  $full_url = ltrim($full_url, "/");
+
+  // Remove ? query string
+  if (!$allow_queries) {
+    $full_url = ltrim($full_url, "?");
+    $parts = explode("?", $full_url);
+    $full_url = $parts[0];
+  }
+
+  return $full_url;
+
+  // For link-7.x-1.3
+  // $item['url'] is cut off at argument list
+  // so we need to construct the full url from the query array
+  // ie: ?options=abc
+  /*$full_url = $item['url'];
+  print_r($item);
+  $arg_seperator = "?";
+  if (sizeof($item['query']) > 0) {
+    foreach($item['query'] as $key => $val) {
+      if ($val != null) {
+        $full_url .= $arg_seperator . t($key) . "=" . t($val);
+      } else {
+        $full_url .= $arg_seperator . t($key);
+      }
+      $arg_seperator = "&"; 
+    }
+  }
+  return $full_url;*/
+}
+
+/**
+* Implements hook_field_formatter_view()
+* see: See more at: http://www.whenwhowhere.com/tech-blog/create-custom-field-formatter-drupal-7#sthash.pf9Fsjzp.dpuf
+* Note: It's the renderer's responsibility to run check_url() and check_plain() when displaying
+*/
+function tm_fields_field_formatter_view($entity_type, $entity, $field, $instance, $langcode, $items, $display) {
+  $element = array();
+  switch ($display['type']) {
+    case 'tm_fields_link':
+      foreach ($items as $delta => $item) {
+
+        // $item['url'] is cut off at argument list
+        // so we need to construct the full url from the query array
+        // ie: ?options=abc
+        $full_url = _tm_fields_full_url($item);
+        
+        // valid URL
+        // use diegoperini regex from https://gist.github.com/dperini/729294
+        $url_regex = '_^(?:(?:https?|ftp)://)(?:\S+(?::\S*)?@)?(?:(?!(?:10|127)(?:\.\d{1,3}){3})(?!(?:169\.254|192\.168)(?:\.\d{1,3}){2})(?!172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2})(?:[1-9]\d?|1\d\d|2[01]\d|22[0-3])(?:\.(?:1?\d{1,2}|2[0-4]\d|25[0-5])){2}(?:\.(?:[1-9]\d?|1\d\d|2[0-4]\d|25[0-4]))|(?:(?:[a-z\x{00a1}-\x{ffff}0-9]-*)*[a-z\x{00a1}-\x{ffff}0-9]+)(?:\.(?:[a-z\x{00a1}-\x{ffff}0-9]-*)*[a-z\x{00a1}-\x{ffff}0-9]+)*(?:\.(?:[a-z\x{00a1}-\x{ffff}]{2,})).?)(?::\d{2,5})?(?:[/?#]\S*)?$_iuS';
+
+        // Only render if URL is valid
+        if(preg_match($url_regex, $full_url)) {
+
+          // sanitize for output
+          $element[$delta] = array(
+            '#theme' => 'tm_fields_link', 
+            '#title' => $item['title'], 
+            '#url' => $full_url,
+          );
+        }
+      }
+
+    break;
+    case 'tm_fields_twitter':
+      foreach ($items as $delta => $item) {
+        $element[$delta] = array(
+          '#theme' => 'tm_fields_twitter', 
+          '#title' => $item['title'], 
+          '#url' => _tm_fields_full_url($item, false), // remove ? arguments
+        );
+     }
+
+    break;
+    case 'tm_fields_facebook':
+      foreach ($items as $delta => $item) {
+        $element[$delta] = array(
+          '#theme' => 'tm_fields_facebook', 
+          '#title' => $item['title'], 
+          '#url' => _tm_fields_full_url($item, true), // keep ? arguments
+        );
+     }
+    break;
+    case 'tm_fields_linkedin':
+      foreach ($items as $delta => $item) {
+        $element[$delta] = array(
+          '#theme' => 'tm_fields_linkedin', 
+          '#title' => $item['title'], 
+          '#url' => _tm_fields_full_url($item), // may contain ? arguments
+        );
+     }
+    break;
+    case 'tm_fields_instagram':
+      foreach ($items as $delta => $item) {
+        $element[$delta] = array(
+          '#theme' => 'tm_fields_instagram', 
+          '#title' => $item['title'], 
+          '#url' => _tm_fields_full_url($item, false), // remove ? arguments
+        );
+     }
+    break;
+    case 'tm_fields_youtube':
+      foreach ($items as $delta => $item) {
+        $element[$delta] = array(
+          '#theme' => 'tm_fields_youtube', 
+          '#title' => $item['title'], 
+          '#url' => _tm_fields_full_url($item), // may contain ? arguments
+        );
+     }
+    break;
+    case 'tm_fields_vimeo':
+      foreach ($items as $delta => $item) {
+        $element[$delta] = array(
+          '#theme' => 'tm_fields_vimeo', 
+          '#title' => $item['title'], 
+          '#url' => _tm_fields_full_url($item, false), // remove ? arguments
+        );
+     }
+    break;
+    case 'tm_fields_snapchat':
+      foreach ($items as $delta => $item) {
+        $element[$delta] = array(
+          '#theme' => 'tm_fields_snapchat', 
+          '#title' => $item['title'], 
+          '#url' => _tm_fields_full_url($item, false), // remove ? arguments
+        );
+     }
+    break;
+    case 'tm_fields_strava':
+      foreach ($items as $delta => $item) {
+        $element[$delta] = array(
+          '#theme' => 'tm_fields_strava', 
+          '#title' => $item['title'], 
+          '#url' => _tm_fields_full_url($item, false), // remove ? arguments
+        );
+     }
+    break;
+    case 'tm_fields_tiktok':
+      foreach ($items as $delta => $item) {
+        $element[$delta] = array(
+          '#theme' => 'tm_fields_tiktok', 
+          '#title' => $item['title'], 
+          '#url' => _tm_fields_full_url($item, false), // remove ? arguments
+        );
+     }
+    break;
+  }
+  return $element;
+}
+
+/**
+ * Display connection actions for following
+ */
+function tm_fields_connection_actions($field) {
+  
+  if (!user_is_logged_in()) {
+    return;
+  }
+
+  if (isset($field['entity']->name)) {
+
+    global $user;
+    global $conf;
+
+    $my_uid = $user->uid;
+    $their_uid = $field['entity']->uid;
+    $their_name = $field['entity']->realname;
+    $first_name = $field['entity']->field_user_first_name[LANGUAGE_NONE][0]['value'];
+
+    // check if looking at self
+    if ($my_uid == $their_uid) {
+      return;
+    }
+
+    $flag = flag_get_flag('follow_members');
+    $you_are_following_them = ($flag->is_flagged($their_uid, $my_uid));
+    $they_are_following_you = ($flag->is_flagged($my_uid, $their_uid));
+
+    if ($you_are_following_them and $they_are_following_you) {
+      $html = "You are connected";
+
+      // Generate message link
+      $messaging_html = tm_messaging_make_send_message_link($user, $field['entity']);
+
+      if ($messaging_html != null) {
+        $html .= '<span class="hierarchical-select-item-separator">›</span>';
+        $html .= $messaging_html;
+      }
+
+      return $html;
+    }
+
+    if ($they_are_following_you) {
+      $html = $their_name . " is following you";
+      if (tm_messaging_check_send_message($my_uid, $their_uid, true)) {
+        drupal_set_message("You can message " . $their_name . " if you follow them back.", 'page_notice');
+        drupal_add_js(drupal_get_path('module', 'tm_messaging') . '/js/tm_messaging_turn_off_flag_ajax.js');
+
+      }
+      return $html;
+    }
+
+    if ($you_are_following_them) {
+      return "You are following " . $their_name;
+    }
+
+    if (!$you_are_following_them and !$they_are_following_you) {
+      return;
+    }
+  }
+}
+
+/**
+ * Helper method to generate google analytics report link
+ */
+function tm_fields_google_analytics_report_link($path) {
+
+  global $conf;
+
+  // Construct a link to google analytics report drilldown
+
+  // Example:
+  // Original url:
+  // /events/2016/08/example-event-name/
+  // 
+  // Is converted to:
+  // https://analytics.google.com/analytics/web/?authuser=1#report/content-drilldown/GOOGLE_AUTH_KEY/%3F_u.dateOption%3Dlast30days%26explorer-table.plotKeys%3D%5B%5D%26_r.drilldown%3Danalytics.pagePathLevel1%3A%2Fevents%2F%2Canalytics.pagePathLevel2%3A%2F2016%2F%2Canalytics.pagePathLevel3%3A%2F08%2F%2Canalytics.pagePath%3A%2Fevents%2F2016%2F08%2Fexample-event-name/
+
+  // Part 1. Report base path
+  // https://analytics.google.com/analytics/web/?authuser=1#report/content-drilldown/GOOGLE_ANALYTICS_HASH/%3F_u.dateOption%3Dlast30days%26explorer-table.plotKeys%3D%5B%5D%26_r.drilldown%3D
+  $report_base_path = $conf["tm_google_analytics_report_path"];
+
+  // Part 2. Add paths
+  $parts = explode("/", $path);
+  $path_levels = array();
+  for ($i = 0; $i < sizeof($parts); $i++) {
+
+      // construct path level
+      // ie: Level 1 = /events/
+      // ie: Level 2 = /2016/
+      // ie: Level 3 = /08/ etc
+      $path_level = $parts[$i]; //
+
+      // construct path_prefix
+      // ie: analytics.pagePathLevel for all levels except last
+      // ie: analytics.pagePath for last level
+      if ($i == (sizeof($parts)-1)) {
+        $path_prefix = "analytics.pagePath";
+        $path_levels[] = $path_prefix . "%3A%2F" . implode("%2F", $parts);
+      } else {
+        $path_prefix = "analytics.pagePathLevel" . ($i+1);
+        $path_levels[] = $path_prefix . "%3A%2F" . $path_level;
+      }
+
+      
+  }
+
+  $path_levels_string = implode("%2F%2C", $path_levels);
+
+  // Part 3. Join report base path and path levels string
+  $google_analytics_report_link = $report_base_path . $path_levels_string;
+
+  return $google_analytics_report_link;
+}
+
+/**
+ * Check that tm_track_views is enabled first
+ */
+function _tm_ds_track_viewers_wrapper($field, $title = NULL) {
+
+  // call ds function in tm_track_views.display
+  if (module_exists("tm_track_views")) {
+    return _tm_ds_track_viewers($field, $title);
+  }
+
+  // tm_track_views not enabled
+  return "";
+}

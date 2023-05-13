@@ -1,0 +1,37 @@
+<?php
+
+/**
+ * @file
+ * Functional tests for Time Zone Field module.
+ */
+
+/**
+ * Functional tests for Time Zone Field module.
+ */
+class TzFieldTest extends DrupalWebTestCase {
+
+  /**
+   * {@inheritdoc}
+   */
+  public static function getInfo() {
+    return array(
+      'name' => 'Time Zone Field',
+      'description' => 'Tests for Time Zone Field module.',
+      'group' => 'tzfield',
+    );
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function setUp() {
+    parent::setUp('tzfield');
+  }
+
+  /**
+   * Tests Time Zone Field module.
+   */
+  public function testTimeZoneField() {
+  }
+
+}

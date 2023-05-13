@@ -1,0 +1,502 @@
+<?php
+/**
+ * @file
+ * Code for the TM Organization module.
+ */
+
+include_once 'tm_organizations.features.inc';
+include_once 'tm_organizations.display.inc';
+include_once 'tm_organizations.follow.inc';
+include_once 'tm_organizations.helpers.inc';
+include_once 'tm_organizations.moderate.inc';
+include_once 'tm_organizations.grants.inc';
+include_once 'tm_organizations.footer.inc';
+
+/*
+* Implements hook_menu()
+*/
+function tm_organizations_menu() {
+
+  $items['node/%node/follow_organization'] = array(
+    'title' => 'Follow organization',
+    'page callback' => 'tm_organizations_follow_message',
+    'page arguments' => array(1),
+    'access callback' => 'user_is_logged_in',
+    'type' => MENU_CALLBACK,
+  );
+  $items['node/%node/moderate_report_organization'] = array(
+    'title' => 'Report organization profile',
+    'page callback' => 'tm_organizations_moderate_report_organization',
+    'page arguments' => array(1),
+    'access callback' => 'tm_organizations_moderate_report_check',
+    'type' => MENU_CALLBACK,
+  );
+  $items['node/%node/moderate_report_organization_resolved'] = array(
+    'title' => 'Report organization profile',
+    'page callback' => 'tm_organizations_moderate_report_organization_resolved',
+    'page arguments' => array(1),
+    'access callback' => 'tm_organizations_moderate_report_resolved_check',
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+
+}
+
+/* 
+ * Alters a node on saving to make sure organizations have the owner field set to author
+ */
+function tm_organizations_node_presave($node) {
+  
+  global $user;
+
+  // make sure we are working on an organization node
+  if ($node->type != "organization") { return; }
+
+  // Ignore if this is triggered from tm_users_user_cancel reassign
+  $tm_user_cancel_reassign_company = drupal_static('tm_user_cancel_reassign_company');
+  if ($tm_user_cancel_reassign_company == true) {
+    return;
+  }
+
+  // Step 1. See how many owners the organization has
+  $num_owners = 0;
+  $owned_by_node_creator = false;
+  $owner_uid = 0;
+  foreach ($node->field_owner[LANGUAGE_NONE] as $owner) {
+
+    // get owner uid in case transferring ownership
+    if ($num_owners == 0) {
+      $owner_uid = $owner['target_id'];
+    }
+    
+    // check if owned by node creator
+    if ($owner['target_id'] == $node->uid) {
+      $owned_by_node_creator = true;
+    }
+
+    $num_owners++;
+  }
+
+  // Step 2. If no owner set, then add the node owner
+  if ($num_owners == 0) {
+    $node->field_owner[LANGUAGE_NONE][] = array('target_id' => $node->uid);
+  }
+  
+  // Step 3. If not owned by node creator, either:
+
+  // Case 1. Chapter leader, moderator = re-assign the node ownership
+  // Case 2. Non-chapter leader, moderator = add user as an owner again
+
+  if ((!$owned_by_node_creator) and ($num_owners > 0)) {
+
+    // Case 1
+    if ((in_array("chapter leader", $user->roles)) or (in_array("moderator", $user->roles)) or (in_array("administrator", $user->roles))) {
+
+      // Re-assign node ownership
+      $node->uid = $owner_uid;
+
+      $message = "Ownership of company page " . strip_tags($node->title) . " (nid: " . $node->nid . ") has been assigned from uid " . $node->uid . " to " . $owner_uid;
+      watchdog('tm_organizations', $message, WATCHDOG_INFO);
+
+    } else {
+
+      // Add user as an owner
+      $node->field_owner[LANGUAGE_NONE][] = array('target_id' => $node->uid);
+
+    }
+
+  }
+
+  // Trim COVID-19 Message
+  if (isset($node->field_company_covid19_message[LANGUAGE_NONE][0]['value'])) {
+    $trimmed = trim($node->field_company_covid19_message[LANGUAGE_NONE][0]['value']);
+    if ($trimmed != "") {
+      // save trimmed value
+      $node->field_company_covid19_message[LANGUAGE_NONE][0]['value'] = $trimmed;
+    } else {
+      // remove empty value
+      $node->field_company_covid19_message[LANGUAGE_NONE][0]['value'] = null;
+    }
+  }
+
+}
+
+/**
+ * Check if the user can create a company
+ */ 
+function tm_organizations_check_user_can_create_company($uid) {
+
+  global $conf;
+  $account = user_load($uid);
+
+  // If tm_add_company_enabled is false, only moderator can create company pages 
+  if (isset($conf["tm_add_company_enabled"])) {
+    if ($conf["tm_add_company_enabled"] == false) {
+      if (!in_array("moderator", $account->roles)) {
+        return false;
+      }
+    }
+  }
+
+  // Must be an approved user
+  if (!in_array("approved user", $account->roles)) {
+    return false;
+  }
+
+  // Reported members cannot create companies
+  if (tm_users_is_member_reported($account->uid)) {
+    return false;
+  }
+
+  // Chapter leaders, moderators can always create companies
+  if (in_array("chapter leader", $account->roles) or in_array("moderator", $account->roles)) {
+    return true;
+  }
+
+  // Limit number of companies a user can create
+  // Set tm_add_company_limit
+  $users_companies = tm_users_get_companies($uid);
+  $tm_add_company_limit = 8; // default if not set
+  if (isset($conf["tm_add_company_limit"])) {
+    $tm_add_company_limit = $conf["tm_add_company_limit"];
+  }
+
+  return (sizeof($users_companies) < $tm_add_company_limit);
+}
+
+
+/**
+ * Preprocess page
+ */
+function tm_organizations_preprocess_page(&$variables, $hook) {
+
+  global $user;
+  global $conf;
+
+  $default_message = "Discover and connect with other companies in the " . $conf["tm_site_name"] . " network. Add a <a href='/node/add/organization'>company page</a>.";
+
+  if (module_exists("tm_search_api")) {
+    $default_message = "Discover and connect with other companies in the " . $conf["tm_site_name"] . " network, or try our <a href='/search'>advanced search</a>. Add a <a href='/node/add/organization'>company page</a>.";
+  }
+
+  // Don't allow user to exceed limit of adding companies
+  if (current_path() == "node/add/organization") {
+    if (!tm_organizations_check_user_can_create_company($user->uid)) {
+      if (!user_is_logged_in()) {
+        return;
+      }
+      $message = "Sorry, you've reached the limit of the number of company pages you can create.";
+      drupal_set_message($message, 'page_notice');
+      //drupal_goto("user/" . $user->uid);
+    }
+  }
+
+  // Put a notice to create company accounts on company page
+  if (current_path() == "companies") {
+
+    // Ignore anonymous users
+    if (!user_is_logged_in()) {
+      drupal_set_message($default_message, 'page_notice');
+      return;
+    }
+
+    // Only a loaded user has values for the fields.
+    $loaded = user_load($user->uid);
+
+    // Check if user has created any company pages 
+    $user_has_companies = false;
+    $query = new EntityFieldQuery();
+    $markup = '';
+    $query->entityCondition('entity_type', 'node')
+      ->entityCondition('bundle', 'organization')
+      ->propertyCondition('status', NODE_PUBLISHED)
+      ->fieldCondition('field_owner', 'target_id', $user->uid, '=');
+    $result = $query->execute();
+
+    if (isset($result['node'])) {
+      $user_has_companies = true;
+    }
+
+    // Check if user has provided a job role
+    $job_role = null;
+    if (isset($loaded->field_job_role[LANGUAGE_NONE][0]['value'])) {
+      $job_role = $loaded->field_job_role[LANGUAGE_NONE][0]['value'];
+    }
+
+    // Check if user has provided a job organization
+    $job_organization = null;
+    if (isset($loaded->field_job_organization[LANGUAGE_NONE][0]['value'])) {
+      $job_organization = $loaded->field_job_organization[LANGUAGE_NONE][0]['value'];
+    }
+
+    // Don't show message if no role or organizaton set
+    if (($job_organization == null) && ($job_role == null)) {
+      drupal_set_message($default_message, 'page_notice');
+      return;
+    }
+
+    // Option 1. Create a message if user already has a company
+    if ($user_has_companies) {
+      $message = "Discover and connect with other companies in the " . $conf["tm_site_name"] . " network. View " . l(t('your company pages'), 'user/' . $loaded->uid . "/companies") . ".";
+      drupal_set_message($message, 'page_notice');
+      return;
+    }
+
+    // Option 2. Show message to user to add a company page 
+    if (!in_array("approved user", $loaded->roles)) { 
+      $add_profile_html = "<a href='javascript:void(0)' onclick='document.getElementById(\"pending_approval\").style.display = \"block\";'>company page</a> (pending approval)";
+      } else {
+        $add_profile_html = "<a href='/node/add/organization'>company page</a>";
+    }
+
+    // Create a message
+    if ($job_organization != null) {
+      $message = "Is <strong>" . t($job_organization)  . "</strong> a company or organization? Get discovered by adding a " . $add_profile_html . ".";
+    }
+    elseif ($job_role != null) {
+      $message = "Get your company discovered by adding a " . $add_profile_html . ".";
+    }
+
+    // Display message
+    $message .= "<div id='pending_approval' style='display: none;'>Your account is currently pending verification. Once we've verified your account, you will be able to add your company page.</div>";
+    drupal_set_message($message, 'page_notice');
+
+  }
+  
+  // Put a notice to create company accounts on users company page
+  // Target page, ie: /user/10447/companies
+  $parts = explode("/", current_path());
+  if (sizeof($parts) == 3) {
+    if (($parts[0] == "user") and ($parts[2] == "companies")) {
+      if ($parts[1] == $user->uid) {        
+        $add_profile_html = "<a href='/node/add/organization'>company page</a>";
+        $message = "You are managing the following company pages. ";
+        if (!tm_organizations_check_user_can_create_company($user->uid)) {
+          $message .= "You cannot add any more company pages.";
+        } else {
+          $message .= "Add a new " . $add_profile_html . ".";
+        }
+        drupal_set_message($message, 'page_notice');
+      }
+    }
+  }
+
+  // Add photo edit js
+  if (isset($variables['node'])) {
+    tm_organizations_add_photo_edit_js($variables['node']);
+  }
+
+}
+
+/**
+ * Customize organization edit form 
+ */
+function tm_organizations_form_alter(&$form, $form_state, $form_id) {
+
+  global $conf;
+  global $user;
+
+  // Alter companies view dropdowns
+  // Note this should be in tm_organizations but it doesn't seem to fire there
+  // Cache for 1 hour
+  if(isset($form_state['view'])) {
+    if (($form_state['view']->name == 'companies') && ($form_id == "views_exposed_form")) {
+
+      // Limit countries dropdown to users countries
+      $output = '';
+      $output = cache_get('views-exposed-form-companies-countries', 'cache');
+      if (empty($output)) {
+        $result = db_query("SELECT DISTINCT iso2, name from {field_data_field_country} f LEFT JOIN {countries_country} c ON f.field_country_iso2 = c.iso2 WHERE f.bundle = 'organization' AND c.iso2 IS NOT NULL ORDER BY name ASC");
+        $defaultoptions = array('All'=>'- Any -');
+        $output = $defaultoptions + $result->fetchAllKeyed();
+        $form['name_list']['#options'] = $output;
+        cache_set('views-exposed-form-companies-countries', $output, 'cache', time() + 3600);
+      } else{
+        $form['name_list']['#options'] = $output->data;
+      }
+
+      // Alter the segment dropdown
+      // Hide the 2nd level of taxonomy
+      if ($conf["tm_organizations_show_segment_2nd_level"] == false) {
+        foreach ($form['term_node_tid_depth']['#options'] as $key => $obj) {
+          if (isset($obj->option)) {
+            $option = $obj->option;
+            if (strpos(current($option), "-") === 0) {
+              unset($form['term_node_tid_depth']['#options'][$key]);
+            }
+          }
+        }
+      }
+
+      // Replace "All" option to more meaningful name
+      $form['name_list']['#options']['All'] = "Country";
+      if (isset($conf['tm_segment_label'])) {
+        $form['term_node_tid_depth']['#options']['All'] = $conf['tm_segment_label'];
+      } else {
+        $form['term_node_tid_depth']['#options']['All'] = "Industry";
+      }
+
+      // Remove form description
+      unset($form['term_node_tid_depth']['#description']);
+
+      // check if disable industry segment
+      $disable_industry_segment = false;
+      if (isset($conf["tm_users_disable_industry_segment"])) {
+        if ($conf["tm_users_disable_industry_segment"] == true) {
+          hide($form['term_node_tid_depth']);
+        }
+      }
+
+    }
+  }
+
+  // Modify company edit form
+  if ($form_id == 'organization_node_form') {
+    
+    // Add field add links ("+ Add link") 
+    drupal_add_js(drupal_get_path('module', 'tm_organizations') . '/js/organization-edit-field-add-links.js');
+
+    // friendly url
+    $form['field_friendly_url'][LANGUAGE_NONE][0]['value']['#title'] = $conf["tm_field_company_friendly_url_title"];
+    $form['field_friendly_url'][LANGUAGE_NONE][0]['value']['#description'] = $conf["tm_field_company_friendly_url_description"];
+
+    // Show additional link fields based on $conf['tm_users_link_fields']
+    $all_fields = array('website', 'twitter', 'facebook', 'linkedin', 'instagram', 'youtube', 'vimeo', 'snapchat');
+    if (isset($conf["tm_organizations_link_fields"])) {
+      $show_link_fields = $conf["tm_organizations_link_fields"];
+      foreach ($all_fields as $field) {
+        if (!in_array($field, $show_link_fields)) {
+          unset($form['field_link_' . $field]); // hide field
+        }
+      }
+    }
+
+    // hide cover video field if not enabled
+    if (!$conf["tm_cover_videos_enabled"]) {
+      unset($form['field_company_cover_video']);
+    }
+
+    // hide moderator settings for non moderators
+    $perm_is_moderator_or_admin = ((in_array("moderator", $user->roles)) || (in_array("administrator", $user->roles)));
+    if (!$perm_is_moderator_or_admin) {
+      field_group_hide_field_groups($form, array('group_company_moderator_settings'));
+    }
+
+    // check if payments not enabled
+    if (!module_exists("tm_payments")) {
+      field_group_hide_field_groups($form, array('group_company_payments'));
+      unset($form['field_company_payments_enabled']);
+      unset($form['field_company_payment_commission']);
+    }
+
+    // Allow customisation of industry segement
+    if (isset($conf['tm_segment_label']) and isset($conf['tm_segment_organization_description'])) {
+      $form['field_segment'][LANGUAGE_NONE][0]['tid']['#title'] = $conf['tm_segment_label'];
+      $form['field_segment'][LANGUAGE_NONE][0]['tid']['#description'] = $conf['tm_segment_organization_description'];
+    }
+
+    // tm_subscriptions (organizations) deprecated
+    field_group_hide_field_groups($form, array('group_company_account_details'));
+    unset($form['field_company_subscription_type']);
+    unset($form['field_company_subscription_date']);
+    unset($form['field_company_account_contact']);
+    unset($form['field_company_account_email']);
+    unset($form['field_company_account_phone']);
+    unset($form['field_company_account_receipt']);
+    unset($form['field_company_testimonial']);
+
+    // upvote
+    $display_upvotes = $conf["tm_organizations_upvote"];
+    if ($display_upvotes) {
+      $form['field_follower_message'][LANGUAGE_NONE][0]['value']['#title'] = "Message for Upvoters (Optional)";
+      $form['field_follower_message'][LANGUAGE_NONE][0]['value']['#description'] = "Give something back to members who upvote your company.<br>Displays a short message to upvoters on your company page.";
+    }
+
+  }
+  
+}
+
+/**
+ * Modify organization node content before being displayed
+ */
+function tm_organizations_node_view($node, $view_mode, $langcode) {
+
+  if ($node->type != "organization") {
+    return;
+  }
+
+  // Add javascript for chapter display
+  if ($view_mode == 'full') {
+    drupal_add_js(drupal_get_path('module', 'tm_organizations') . '/js/tm_organizations.js');
+  }
+
+  // Show additional link fields based on $conf['tm_users_link_fields']
+  global $conf;
+  $all_fields = array('website', 'twitter', 'facebook', 'linkedin', 'instagram', 'youtube', 'vimeo', 'snapchat');
+  if (isset($conf["tm_organizations_link_fields"])) {
+    $show_link_fields = $conf["tm_organizations_link_fields"];
+    foreach ($all_fields as $field) {
+      if (!in_array($field, $show_link_fields)) {
+        unset($node->content['field_link_' . $field]); // hide field
+      }
+    }
+  }
+
+}
+
+/**
+ * Fast lookup of organizational title
+ */
+function tm_organizations_get_title($nid) {
+
+  $query = "SELECT title FROM node WHERE nid = :nid";
+  $rows = db_query($query, array(':nid' => $nid))->fetch();
+  if ($rows != null) {
+    return $rows->title;
+  }
+  return null;
+}
+
+/**
+ * Get array of organization nodes that were created by the user 
+ */
+function tm_organizations_get_nodes_created($uid) {
+
+  $query = "SELECT nid FROM node WHERE uid = :uid AND type = 'organization'";
+  $rows = db_query($query, array(':uid' => $uid))->fetchAll();
+
+  $nids = array();
+  foreach ($rows as $row) {
+    $nids[] = $row->nid;
+  }
+  return $nids;
+}
+
+/**
+ * Implement hook_field_group_pre_render_alter
+ * Set field group titles for organization followers if upvoting enabled
+ */
+function tm_organizations_field_group_pre_render_alter(&$element, $group, &$form) {
+
+  global $conf;
+
+  // Check if upvoting turned on
+  $display_upvotes = $conf["tm_organizations_upvote"];
+  if (!$display_upvotes) {
+    return;
+  }
+
+  // Member profile page
+  if ($group->group_name == 'group_following_organizations') {   
+    $element['#prefix'] = str_replace("Following Organizations", "Upvoted", $element['#prefix']);
+  }
+
+  // Company page (check we are viewing a node)
+  if ($group->group_name == 'group_community_wrapper') {
+    if (strpos(current_path(), "node/") === 0) {
+      $element['#prefix'] = str_replace("Followers", "Upvoters", $element['#prefix']);
+    }
+  }
+
+}

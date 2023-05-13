@@ -1,0 +1,89 @@
+<?php
+/**
+ * @file
+ * Code for the TM Payments feature.
+ */
+
+include_once 'tm_payments.features.inc';
+include_once 'tm_payments.edit.inc';
+include_once 'tm_payments.permissions.inc';
+include_once 'tm_payments.display.inc';
+include_once 'tm_payments.helpers.inc';
+include_once 'tm_payments.pricing.inc';
+include_once 'tm_payments.flags.inc';
+include_once 'tm_payments.commission.inc';
+include_once 'tm_payments.reports.inc';
+
+/* 
+Stripe Payments Module
+You will also need stripe-payments repository installed into /payments and hosted on another server.
+*/
+
+function tm_payments_menu() {
+
+	global $conf;
+
+	$items = array();
+  $items['payment/reports/event-sales/%node'] = array(
+    'title' => 'Event sales',
+    'page callback' => 'tm_payments_reports_event_sales',
+    'page arguments' => array(3),
+    'access callback' => array('tm_payments_access_sales_check'),
+    'access arguments' => array(3),
+    'type' => MENU_CALLBACK,
+  );
+
+	return $items;
+}
+
+/**
+ * Permission callback. Check if user can access sales data of event
+ */
+function tm_payments_access_sales_check($node) {
+  global $user;
+  return tm_events_check_permission_edit_event($user, $node);
+}
+
+/**
+ * Implement hook_ds_field_info()
+ */
+// see: https://ohthehugemanatee.org/blog/2014/04/02/how-to-create-a-custom-display-suite-field/
+function tm_payments_ds_fields_info($entity_type) {
+  if ($entity_type != 'node') {
+    return;
+  }
+  $fields = array();
+
+  $fields['tm_ds_event_price'] = array(
+    'title' => t('Event price'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('event|full',),
+    'function' => '_tm_payments_price'
+  );
+
+  $fields['tm_ds_event_refund_policy'] = array(
+    'title' => t('Event refund policy'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('event|full',),
+    'function' => '_tm_payments_refund_policy'
+  );
+
+   $fields['tm_ds_event_payments_show_total'] = array(
+    'title' => t('Event payments'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('event|full',),
+    'function' => '_tm_payments_show_total'
+  );
+
+  return array($entity_type => $fields);
+}
+
+/**
+ * Implement hook_node_view
+ */
+function tm_payments_node_view($node, $view_mode, $langcode) {
+  // deprecated
+}
+
+
+?>

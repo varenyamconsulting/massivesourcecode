@@ -1,0 +1,176 @@
+<?php
+/**
+ * @file
+ * Code for the TM Search API feature.
+ */
+
+include_once 'tm_search_api.features.inc';
+include_once 'includes/callback_role_filter_multi.inc';
+include_once 'includes/tm_search_api_excerpt.php';
+
+include_once 'tm_search_api.search.inc';
+include_once 'tm_search_api.display.inc';
+
+
+/* 
+This module implements a search_api_db based search.
+
+Helpful Resources:
+http://drupal.stackexchange.com/questions/107345/programmatical-use-of-search-api
+http://enzolutions.com/articles/2015/06/10/how-to-customize-a-search-api-filters-in-drupal-7/
+https://www.drupal.org/project/search_api_multi
+http://drupal.stackexchange.com/questions/118282/how-to-search-both-users-and-nodes-simultaneously-in-drupal-7
+https://www.phase2technology.com/blog/expanding-indexed-content-with-search-api-data-alterations/
+https://www.drupal.org/node/2043339#comment-7654017 (search_api_db doesn't support phrase searches)
+
+Notes:
+
+1. To reindex:
+
+drush search-api-reindex
+drush search-api-index
+
+2. When reverting features (ie: adding an index), to rebuild the index columns:
+
+https://www.drupal.org/node/1347438#comment-9566299
+
+1. Edit the index and set the Server to "< No Server >" and Save
+2. Edit it again and set the Server back to "Database Server" and Save
+3. Edit it AGAIN and enable it
+4. Now, everything appears to be working fine
+
+Then reindex the database.
+
+*/
+
+/**
+ * Implements hook_menu().
+ */
+function tm_search_api_menu_alter(&$items) {
+
+  	// Add our own custom search 
+  	// If search module enabled, this will override the path
+
+	$items["search"] = array(
+        'title' => "Search",
+        'description' => "Search Page",
+        'page callback' => 'tm_search_api_view',
+        'page arguments' => array('tm_search_api_page_view'),
+        'access callback' => 'tm_search_api_page_access',
+        'type' => MENU_CALLBACK,
+      );
+
+ 	$items['search/results'] = array(
+ 	  'page callback' => 'tm_search_api_ajax',
+      'access arguments' => array('access content')
+
+   	);
+}
+
+/**
+ * Implements hook_search_api_alter_callback_info().
+ */
+function tm_search_api_search_api_alter_callback_info() {
+
+	$callbacks['search_api_alter_role_filter_multi'] = array(
+		'name' => t('Role filter (Multi-index)'),
+		'description' => t('Exclude users from indexing based on their role (multi-index).'),
+		'class' => 'SearchApiAlterRoleFilterMulti',
+		// Filters should be executed first.
+		'weight' => -10,
+	);
+
+	return $callbacks;
+}
+
+/* Search access */
+function tm_search_api_page_access() {
+	return true;
+}
+
+/**
+ * Get the flag count for a given node.
+ * http://matthewgrasmick.com/posts/adding-flag-count-field-search-api-solr-index
+ */
+function tm_search_api_get_flag_count($entity, $options, $name, $entity_type, &$info) {
+
+  if ($entity_type == 'node') {
+    $entity_id = $entity->nid;
+    $entity_type = 'node';
+  }
+  if ($entity_type == 'user') {
+    $entity_id = $entity->uid;
+  }
+
+  $query = db_select('flag_counts' ,'fc');
+  $query->fields('fc', array('count'));
+  $query->condition('fc.fid', $info['data']['flag']->fid);
+  $query->condition('fc.entity_type', $entity_type);
+  $query->condition('fc.entity_id', $entity_id);
+  $count = $query->execute()->fetchColumn();
+ 
+  return !empty($count) ? $count : 0;
+}
+
+/**
+ * Implements hook_entity_property_info_alter().
+ * http://matthewgrasmick.com/posts/adding-flag-count-field-search-api-solr-index
+ */
+function tm_search_api_entity_property_info_alter(&$info) {
+  if (isset($info['node']['bundles'])) {
+    // For each content type.
+    foreach ($info['node']['bundles'] as $bundle_type => $bundle) {
+      // Find all applicable flags for this content type.
+      $flags = flag_get_flags('node', $bundle_type);
+      // For each applicable flag.
+      foreach ($flags as $fid => $flag) {
+        $info['node']['bundles'][$bundle_type]['properties']['flag_' . $flag->name . '_count'] = array(
+          'label' => t('@title Flag Count', array('@title' => $flag->title)),
+          'description' => t('The total number of @title flags for this node.', array('@title' => $flag->title)),
+          'type' => 'integer',
+          'getter callback' => 'tm_search_api_get_flag_count',
+          'computed' => TRUE,
+          'data' => array('flag' => $flag),
+        );
+      }
+    }
+  }
+
+  if (isset($info['user']['bundles'])) {
+    // For each content type.
+    foreach ($info['user']['bundles'] as $bundle_type => $bundle) {
+      // Find all applicable flags for this content type.
+      $flags = flag_get_flags('user', $bundle_type);
+      // For each applicable flag.
+      foreach ($flags as $fid => $flag) {
+        $info['user']['bundles'][$bundle_type]['properties']['flag_' . $flag->name . '_count'] = array(
+          'label' => t('@title Flag Count', array('@title' => $flag->title)),
+          'description' => t('The total number of @title flags for this user.', array('@title' => $flag->title)),
+          'type' => 'integer',
+          'getter callback' => 'tm_search_api_get_flag_count',
+          'computed' => TRUE,
+          'data' => array('flag' => $flag),
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Boost results by flag counts
+ * https://www.finalist.nl/techblog/2015/06/improving-search-result-with-search-api-solr-custom-boosting/
+ */
+function tm_search_api_search_api_solr_query_alter(array &$call_args, SearchApiQueryInterface $query) {
+
+  global $conf;
+
+  // default
+  $bf = 'add(is_node$flag_signup_count) add(is_user$flag_follow_members_count) add(is_node$flag_event_register_count)^100 add(is_node$flag_follow_organizations_count)';
+
+  // allow custom boost in config
+  if (isset($conf["tm_search_api_solr_bf"])) {
+    $bf = $conf["tm_search_api_solr_bf"];
+  }
+
+  $call_args['params']['bf'][] = $bf;
+}

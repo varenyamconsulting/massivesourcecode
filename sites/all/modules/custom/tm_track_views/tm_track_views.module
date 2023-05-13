@@ -1,0 +1,259 @@
+<?php
+
+// tm_track_views.module
+
+include_once 'tm_track_views.features.inc';
+include_once 'tm_track_views.tracking.inc';
+include_once 'tm_track_views.display.inc';
+
+/**
+ * Implements hook_menu().
+ */
+function tm_track_views_menu() {
+  $items = array();
+
+  $items['api/track_views/%/%'] = array(
+      'page callback' => 'tm_track_views_ajax',
+      'page arguments' => array(3, 2),
+      'access arguments' => array('access content')
+   );
+
+  return $items;
+}
+
+/**
+ * Check permissions if user can view page
+ * Current_display = who_viewed_member_profile or who_viewed_company_profile
+ */
+function tm_track_views_check_permission($current_display, $entity_id, $user) {
+
+	// is moderator or admin
+	$perm_is_moderator_or_admin = ((in_array("moderator", $user->roles)) || (in_array("administrator", $user->roles)));
+
+	// allow moderator or admin to view
+	if ($perm_is_moderator_or_admin) {
+		return true;
+	} 
+
+	// who_viewed_member_profile
+	if ($current_display == 'who_viewed_member_profile') {
+		
+		// only allow members to view their own
+		if ($user->uid != $entity_id) {
+			drupal_access_denied();
+			return false;
+		}
+		
+	}
+
+	// who_viewed_company_profile
+	if ($current_display == 'who_viewed_company_profile') {
+		
+		// only allow profile managers to view
+		if (!tm_organizations_is_company_profile_manager($user->uid, $entity_id)) {
+			drupal_access_denied();
+			return false;
+		}
+	}
+
+	// who_viewed_event
+	if ($current_display == 'who_viewed_event') {
+		
+		// check user has permission to edit event
+		$entity = node_load($entity_id);
+		if (!tm_events_check_permission_edit_event($user, $entity)) {
+			drupal_access_denied();
+			return false;
+		}
+	}
+
+	// who_viewed_list
+	if ($current_display == 'who_viewed_list') {
+		
+		if (module_exists("tm_lists")) {
+
+			// check user has permission to edit list
+			if (!tm_lists_user_can_edit_list($user, $entity_id)) {
+				drupal_access_denied();
+				return false;
+			}
+		}
+		
+	}
+
+	// grant permission
+	return true;
+
+}
+
+/**
+ * Implement hook views_query_alter()
+ * Modify the query for who has viewed your profile
+ */
+function tm_track_views_views_query_alter(&$view, &$query) {
+
+	// validate
+	if (($view->current_display != 'who_viewed_member_profile') and ($view->current_display != 'who_viewed_company_profile') and ($view->current_display != 'who_viewed_event') and ($view->current_display != 'who_viewed_list')) {
+		return;
+	}
+
+	// who_viewed_member_profile
+	if ($view->current_display == 'who_viewed_member_profile') {
+		$entity_type = 1;
+		$entity_id = arg(1); // ie: users/123/viewed
+	}
+
+	// who_viewed_company_profile
+	if ($view->current_display == 'who_viewed_company_profile') {
+		$entity_type = 2;
+		$entity_id = arg(1); // ie: company/123/viewed
+	}
+
+	// who_viewed_event
+	if ($view->current_display == 'who_viewed_event') {
+		$entity_type = 2;
+		$entity_id = arg(1); // ie: event/123/viewed
+	}
+
+	// who_viewed_list
+	if ($view->current_display == 'who_viewed_list') {
+		$entity_type = 2;
+		$entity_id = arg(1); // ie: lists/123/viewed
+	}
+
+	// views development
+	/*if ($entity_id == 'structure') {
+		$entity_id = 13739;
+	}*/
+
+	// show unapproved members
+	global $conf;
+	global $user;
+	if ($conf["tm_track_views_display_unapproved"]) {
+		// remove default role condition (rid = 6)
+		unset($query->where[0]['conditions'][0]);
+	}
+	
+	// add join to tm_track_views
+	// https://api.drupal.org/api/views/includes%21handlers.inc/function/views_join%3A%3Aconstruct/7.x-3.x
+  	$join = new views_join;
+  	$join_on = array(
+  				array('field' => 'entity_type', 'value' => $entity_type), 
+  				array('field' => 'entity_id', 'value' => $entity_id));
+	$join->construct('tm_track_views', 'users', 'uid', 'uid', $join_on, 'INNER');
+	$query->add_relationship('tm_track_views', $join, 'users');
+
+	// don't show own views
+	$exlude_uid = $user->uid;
+	if ($entity_type == 1) {
+		$exlude_uid = $entity_id;
+	}
+	$query->add_where(0, "tm_track_views.uid", $exlude_uid, "!=");
+
+	// order by max(timestamp) so most recent view of user appears first
+	// (need to enable aggregation in query to support this)
+	$query->orderby[0]['field'] = "MAX(timestamp)";
+	$query->orderby[0]['direction'] = "DESC";
+}
+
+/**
+ * Discard old entries from tm_track_views.
+ */
+function tm_track_views_cron() {
+
+	global $conf;
+
+	// run once a day
+	$run_cron_every = 24 * 60 * 60;
+
+    $date = date("Y-m-d H:i:s", time());
+    if ((time() - variable_get('tm_track_views_last_cron', 0)) > $run_cron_every ) { 
+
+		// how many days to store
+		$store_days = $conf["tm_track_views_store_days"];
+		$max_seconds_age = $store_days * 24 * 60 * 60;
+
+		// keep track of when last run
+        variable_set('tm_track_views_last_cron', time());
+
+        // remove old entries
+        tm_track_views_flush_old_entries($max_seconds_age);
+    }
+}
+
+/**
+ * Remove old entries
+ */
+function tm_track_views_flush_old_entries($max_seconds_age) {
+
+	db_delete('tm_track_views')
+		->condition('timestamp', REQUEST_TIME - $max_seconds_age, '<')
+		->execute();
+}
+
+/**
+ * Fetch how many people have viewed a profile in the past days
+ */
+function tm_track_views_how_many_viewed($entity_id, $entity_type, $exclude_uid, $past_days) {
+
+	global $conf;
+
+	// enumerate entity_type
+	if (!is_numeric($entity_type)) {
+		$entity_type = tm_track_views_enumerate_entity_type($entity_type);
+	}
+
+	// get number of views
+	$max_seconds = $past_days * 24 * 60 * 60;
+	$query = "SELECT COUNT(DISTINCT(tm_track_views.uid)) AS num_unique_viewers FROM tm_track_views";
+
+	// restrict to approved members
+	if (!$conf["tm_track_views_display_unapproved"]) {
+		$role = user_role_load_by_name("approved user");
+		$query .= " INNER JOIN {users_roles} users_roles ON tm_track_views.uid = users_roles.uid AND users_roles.rid = " . $role->rid;
+	}
+	$query .= " WHERE entity_type = :entity_type AND entity_id = :entity_id AND tm_track_views.uid != :uid AND timestamp > UNIX_TIMESTAMP() - :max_seconds";
+
+	// fetch result
+	$result = db_query($query, array(":entity_type" => $entity_type, ":entity_id" => $entity_id, ":uid" => $exclude_uid, ":max_seconds" => $max_seconds))->fetch();
+
+  	return $result->num_unique_viewers;
+}
+
+/**
+ * Enumerate entity_type
+ */
+function tm_track_views_enumerate_entity_type($entity_type) {
+
+	// enumerate entity_type
+	if ($entity_type == 'user') {
+		return 1;
+	}
+
+	if ($entity_type == 'node') {
+		return 2;
+	}
+
+	// invalid
+	return 0;
+}
+
+/**
+ * Developer test method
+ * Create sample data for user visits
+ */
+function _tm_track_views_generate_sample_data($min_uid = 1, $max_uid = 100, $max_visits = 100, $max_days = 360) {
+
+	$entity_type = 1;
+	for ($uid = $min_uid; $uid <= $max_uid; $uid++) {
+
+		$num_visits = rand(0,$max_visits);
+		for ($j = 0; $j < $num_visits; $j++) {
+
+			$timestamp = rand(REQUEST_TIME - rand(0,($max_days*24*60*60)), REQUEST_TIME);
+			$entity_id = rand($min_uid, $max_uid);
+			tm_track_views_db($entity_id, $entity_type, $uid, $timestamp);
+		}
+	}
+
+}

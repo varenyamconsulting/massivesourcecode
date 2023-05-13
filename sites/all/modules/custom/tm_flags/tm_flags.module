@@ -1,0 +1,502 @@
+<?php
+/**
+ * @file
+ * Code for the TM Flags feature.
+ */
+
+include_once 'tm_flags.features.inc';
+
+/**
+ * Implementation hook tm_flags_preprocess_flag
+ */
+function tm_flags_preprocess_flag(&$variables) {
+
+  // check for unflag of chapter
+  if (_tm_flags_unflag_chapter($variables)) {
+    return;
+  }
+
+  // modify follow flag name (connected)
+  $flag = &$variables['flag'];
+  if ($flag->name == "follow_members") {
+    $flag->unflag_short = "Following";
+  }
+
+  // (optional) upvote organization
+  if ($flag->name == "follow_organizations") {
+    _tm_flags_organization_upvote($variables);
+  }
+
+  // don't apply follow limits to certain members
+  // $conf["tm_following_ratio_exclude_uids"];
+  $exclude_user = false;
+  if (($flag->name == "follow_members") or ($flag->name == "follow_organizations") or ($flag->name == "signup")) {
+    global $conf;
+    if (isset($conf['tm_following_ratio_exclude_uids'])) {
+      $uid = $variables['user']->uid;
+      if (in_array($uid, $conf['tm_following_ratio_exclude_uids'])) {
+        $exclude_user = true;
+      }
+    }
+  }
+
+  // if tm_match enabled
+  // if someone has swiped right on you, always allow follow
+  if ($flag->name == "follow_members") {
+    if (module_exists("tm_match")) {
+      $entity_id = $variables['entity_id'];
+      $uid = $variables['user']->uid;
+      if (tm_match_user_has_swiped_right($entity_id, $uid)) {
+        return;
+      }
+    }
+  }
+
+  // check for follow and join limits
+  return _tm_flags_flag_limits($variables, $exclude_user);
+}
+
+function _tm_flags_organization_upvote(&$variables) {
+ 
+  global $conf;
+  $display_upvotes = $conf["tm_organizations_upvote"];
+  if (!$display_upvotes) {
+    return;
+  }
+
+  // Some typing shotcuts:
+  $flag = &$variables['flag'];
+  $action = $variables['action'];
+  $entity_id = $variables['entity_id'];
+  $flag_css_name = str_replace('_', '-', $flag->name);
+  $uid = $variables['user']->uid;
+
+  // Get number of upvotes
+  $num_upvotes = tm_organizations_get_num_followers($entity_id);
+  if ($num_upvotes == 0) {
+    $num_upvotes = "";
+  } else {
+    $num_upvotes = number_format($num_upvotes);
+  }
+
+  if (($flag->name == "follow_organizations") && ($action == "flag")) {
+    $flag->flag_short = 'Upvote <span class="btn_upvote_count">' . $num_upvotes . '</span>';
+  }
+
+  if (($flag->name == "follow_organizations") && ($action == "unflag")) {
+    $flag->unflag_short = 'Upvoted <span class="btn_upvote_count">' . $num_upvotes . '</span>';
+  }
+
+  $variables['flag_upvote_class'] = 'upvote';
+
+}
+
+function _tm_flags_unflag_chapter(&$variables) {
+
+  // Some typing shotcuts:
+  $flag = &$variables['flag'];
+  $action = $variables['action'];
+  $entity_id = $variables['entity_id'];
+  $flag_css_name = str_replace('_', '-', $flag->name);
+  $uid = $variables['user']->uid;
+
+  // check for chapter leader of chapter leaving
+  // we don't want to allow chapter leaders to leave their own chapter
+  if (($flag->name == "signup") && ($action == "unflag")) {
+
+    $chapters_leader_nids = array();
+    $query = new EntityFieldQuery();
+    $query->entityCondition('entity_type', 'node')
+      ->entityCondition('bundle', 'chapter')
+      ->propertyCondition('status', NODE_PUBLISHED)
+      ->fieldCondition('field_chapter_leaders', 'target_id', $uid, '=');
+
+    $result = $query->execute();
+    if (isset($result['node'])) {
+      $chapters_leader_nids = array_keys($result['node']);
+    }
+
+    if (in_array($entity_id, $chapters_leader_nids)) {
+      $chapter = node_load($entity_id);
+      $variables['flag_button_class'] = 'flag-limit follow bttn bttn-secondary bttn-m';
+      drupal_add_js('
+      jQuery(document).ready(function($) {
+        $( ".flag" ).unbind("click");
+        $( ".flag" ).bind("click.confirm", function(event) {
+          jq_alert(null, "You can\'t leave this chapter as you are currently a Chapter Leader for ' . htmlentities($chapter->title, ENT_QUOTES | ENT_HTML5) . '.");
+          event.preventDefault();
+        });
+      });
+      ', 'inline');
+      return true;
+    }
+  }
+
+  // check for a member leaving a chapter
+  // confirm that the user wants to leave the chapter
+  if (($flag->name == "signup") && ($action == "unflag")) {
+    $chapter = node_load($entity_id);
+    $variables['flag_button_class'] = 'flag-limit follow bttn bttn-secondary bttn-m';
+    drupal_add_js('
+    jQuery(document).ready(function($) {
+      $( ".flag" ).unbind("click");
+      $( ".flag" ).bind("click.confirm", function(event) {
+        jq_confirm_leave_chapter(\''.htmlentities($chapter->title, ENT_QUOTES | ENT_HTML5).'\');
+        return false;
+      });
+    });
+    ', 'inline');
+    return true;
+  }
+
+  // check for a member unregistering from event
+  // confirm that the user wants to unregister
+  if (($flag->name == "event_register") && ($action == "unflag")) {
+    $event = node_load($entity_id);
+    $variables['flag_button_class'] = 'flag-limit follow bttn bttn-secondary bttn-m';
+    drupal_add_js('
+    jQuery(document).ready(function($) {
+      $( ".flag" ).unbind("click");
+      $( ".flag" ).bind("click.confirm", function(event) {
+        jq_confirm_unregister_event(\''.htmlentities($event->title, ENT_QUOTES | ENT_HTML5).'\');
+        return false;
+      });
+    });
+    ', 'inline');
+    return true;
+  }
+
+  // check for a member unregistering from waitlist
+  // confirm that the user wants to leave waitlist
+  if (($flag->name == "event_waitlist") && ($action == "unflag")) {
+    $event = node_load($entity_id);
+    $variables['flag_button_class'] = 'flag-limit follow bttn bttn-secondary bttn-m';
+    drupal_add_js('
+    jQuery(document).ready(function($) {
+      $( ".flag" ).unbind("click");
+      $( ".flag" ).bind("click.confirm", function(event) {
+        jq_confirm_unregister_waitlist(\''.htmlentities($event->title, ENT_QUOTES | ENT_HTML5).'\');
+        return false;
+      });
+    });
+    ', 'inline');
+    return true;
+  }
+
+  // no action
+  return false;
+
+}
+
+
+/*
+ * Impose a limit on follower/following ratio and join limit
+ * https://github.com/travelmassive/massiveplatform/issues/52
+ * https://github.com/travelmassive/massiveplatform/issues/51
+ * 
+ * config.php settings:
+ * $conf['tm_following_ratio_limit'] = '50'; // difference between following/followers
+ * $conf['tm_chapter_join_limit'] = '16'; // "join" limit for the non chapter leaders
+ */
+function _tm_flags_flag_limits(&$variables, $exclude_user = false) {
+  
+  global $conf;
+  global $user;
+  $initialized = &drupal_static(__FUNCTION__, array());
+
+  // if user has been reported, limit flags
+  if (tm_users_is_member_reported($user->uid)) {
+    $tm_limit = true;
+  }
+
+  // Additional quota for approved members
+  $mfr_limit_quota = 0;
+  if (variable_get('tm_following_ratio_limit_daily', NULL) != null) {
+    if (in_array('approved user', $user->roles)) {
+
+      // get list of people who approved
+      $flag = flag_get_flag('approval_approved_by');
+      $who_flagged = flag_get_entity_flags("user", $user->uid, "approval_approved_by");
+
+      // If no approval flag, use launch date (prior to approval flag being implemented)
+      if (sizeof($who_flagged) == 0) {
+        $approval_timestamp = strtotime("2015-01-01");
+      } else {
+        usort($who_flagged, function($a, $b){
+          return ($a->timestamp > $b->timestamp) ? -1 : 1;
+        });
+        $approval_timestamp = $who_flagged[0]->timestamp;
+      }
+
+      // seconds since approved
+      $age_of_approval = time() - $approval_timestamp;
+
+      // get daily quota
+      $limit_daily = variable_get('tm_following_ratio_limit_daily', NULL);
+
+      // caculate additional quota
+      $mfr_limit_quota = round($limit_daily * ($age_of_approval / (60 * 60 * 24)), 0);
+    }
+  }
+
+  global $mfr_limit;
+  $mfr_limit = 50; // default if not set
+
+  if (in_array('approved user', $user->roles)) {
+    // approved users
+    if (variable_get('tm_following_ratio_limit', NULL) != null) {
+      $mfr_limit = variable_get('tm_following_ratio_limit', NULL);
+    }
+    $mfr_limit += $mfr_limit_quota; // add quota
+  } else {
+    // unapproved users
+    if (variable_get('tm_following_ratio_limit_unapproved', NULL) != null) {
+      $mfr_limit = variable_get('tm_following_ratio_limit_unapproved', NULL);
+    }
+  }
+
+  $limit = 16; // default if not set
+  if (variable_get('tm_chapter_join_limit', NULL) != null) {
+    $limit = variable_get('tm_chapter_join_limit', NULL);
+  }
+
+  // Some typing shotcuts:
+  $flag = &$variables['flag'];
+  $action = $variables['action'];
+  $entity_id = $variables['entity_id'];
+  $flag_css_name = str_replace('_', '-', $flag->name);
+
+  // Generate the link URL.
+  $link_type = $flag->get_link_type();
+  $link = module_invoke($link_type['module'], 'flag_link', $flag, $action, $entity_id);
+  if (isset($link['title']) && empty($link['html'])) {
+    $link['title'] = check_plain($link['title']);
+  }
+
+  // Replace the link with the access denied text if unable to flag.
+  if ($action == 'unflag' && !$flag->access($entity_id, 'unflag')) {
+    $link['title'] = $flag->get_label('unflag_denied_text', $entity_id);
+    unset($link['href']);
+  }
+
+  // Anonymous users always need the JavaScript to maintain their flag state.
+  if ($user->uid == 0) {
+    $link_type['uses standard js'] = TRUE;
+  }
+
+  // Load the JavaScript/CSS, if the link type requires it.
+  if (!isset($initialized[$link_type['name']])) {
+    if ($link_type['uses standard css']) {
+      drupal_add_css(drupal_get_path('module', 'flag') . '/theme/flag.css');
+    }
+    if ($link_type['uses standard js']) {
+      drupal_add_js(drupal_get_path('module', 'flag') . '/theme/flag.js');
+    }
+    $initialized[$link_type['name']] = TRUE;
+  }
+
+  $variables['link'] = $link;
+  $variables['link_href'] = isset($link['href']) ? check_url(url($link['href'], $link)) : FALSE;
+  $variables['link_text'] = isset($link['title']) ? $link['title'] : $flag->get_label($action . '_short', $entity_id);
+  $variables['link_title'] = isset($link['attributes']['title']) ? check_plain($link['attributes']['title']) : check_plain(strip_tags($flag->get_label($action . '_long', $entity_id)));
+  $variables['status'] = ($action == 'flag' ? 'unflagged' : 'flagged');
+  $variables['flag_name_css'] = $flag_css_name;
+
+  $variables['flag_wrapper_classes_array'] = array();
+  $variables['flag_wrapper_classes_array'][] = 'flag-wrapper';
+  $variables['flag_wrapper_classes_array'][] = 'flag-' . $flag_css_name;
+  $variables['flag_wrapper_classes_array'][] = 'flag-' . $flag_css_name . '-' . $entity_id;
+  $variables['flag_wrapper_classes'] = implode(' ', $variables['flag_wrapper_classes_array']);
+
+  $variables['flag_classes_array'] = array();
+  $variables['flag_classes_array'][] = 'flag';
+  if (isset($link['href'])) {
+    $variables['flag_classes_array'][] = $variables['action'] . '-action';
+    $variables['flag_classes_array'][] = 'flag-link-' . $flag->link_type;
+  }
+  else {
+    $variables['flag_classes_array'][] = $variables['action'] . '-disabled';
+  }
+  if (isset($link['attributes']['class'])) {
+    $link['attributes']['class'] = is_string($link['attributes']['class']) ? array_filter(explode(' ', $link['attributes']['class'])) : $link['attributes']['class'];
+    $variables['flag_classes_array'] = array_merge($variables['flag_classes_array'], $link['attributes']['class']);
+  }
+  if ($variables['after_flagging']) {
+    $inverse_action = ($action == 'flag' ? 'unflag' : 'flag');
+    $variables['message_text'] = $flag->get_label($inverse_action . '_message', $entity_id);
+    $variables['flag_classes_array'][] = $variables['status'];
+  }
+  $variables['flag_classes'] = implode(' ', $variables['flag_classes_array']);
+
+  // Backward compatibility: The following section preserves some deprecated
+  // variables either to make old flag.tpl.php files continue to work, or to
+  // prevent PHP from generating E_NOTICEs there. @todo: Remove these sometime.
+  $variables['setup'] = FALSE;
+  $variables['last_action'] = $variables['status'];
+
+  /** TM Limit **/
+  if($variables['action'] == 'flag') {
+    $uid = $user->uid;
+    $flag_name = $flag->name;
+    // We want override flag function only on the node and user pages, only for no trusted user
+    $cur_entity = ((arg(0) == 'node' || arg(0) == 'user') && is_numeric(arg(1))) ? arg(0) : '';
+    $trusted_user = (array_intersect($user->roles, array('administrator', 'chapter leader'))) ? TRUE : FALSE;
+    if ($exclude_user) { 
+      $trusted_user = true;
+    }
+    
+    // "Join" limit for the non chapter leaders
+  if ($flag_name == 'signup' && $cur_entity == 'node' && $trusted_user !== TRUE) {
+      // Get Join count
+      $fg_n = flag_get_user_flags('node', NULL, $uid, NULL, FALSE);
+      $fg_signup_count = (isset($fg_n['signup'])) ? count($fg_n['signup']) : NULL;
+      if ($fg_signup_count >= $limit){
+        $tm_limit = TRUE;
+      };
+    }
+    
+    // Following limit reached
+    // Add a simple cache for pages with multiple flags
+    global $fg_count; // Following count
+    if((($flag_name == 'follow_members' && $cur_entity == 'user') || ($flag_name == 'follow_organizations' && $cur_entity = 'node')) && $trusted_user !== TRUE) {
+      if(!isset($fg_count)) { //} && !isset($mfr_limit)) {
+  
+        $fg_u = flag_get_user_flags('user', NULL, $uid, NULL, FALSE); // Following user
+        $fg_n = flag_get_user_flags('node', NULL, $uid, NULL, FALSE); // Following node
+        
+        // Get following count
+        $fg_count = (isset($fg_u['follow_members'])) ? count($fg_u['follow_members']) : NULL;
+        $fg_count = (isset($fg_n['follow_organizations'])) ? $fg_count += count($fg_n['follow_organizations']) : $fg_count;
+      }
+      // Calculate only when flaging count >= massiveplatform_following_ratio_limit
+      if ($fg_count >= $mfr_limit) {
+        // Get followers count
+        $fr = flag_get_counts('user', $uid, FALSE);
+        $fr_count = (isset($fr['follow_members'])) ? count($fr['follow_members']) : 0;
+
+        if ($fg_count - $fr_count >= $mfr_limit){
+          $tm_limit = TRUE;
+        }
+      }
+    }
+
+    $limit_unapproved = false;
+
+    // limit follow members to unapproved members
+    if (isset($conf['tm_unapproved_follow_member'])) {
+      if (($flag_name == 'follow_members') and (!$conf['tm_unapproved_follow_member']) and (!in_array('approved user', $user->roles))) {
+        $limit_unapproved = true;
+      }
+    }
+
+    // limit follow organizations to unapproved members
+    if (isset($conf['tm_unapproved_follow_company'])) {
+      if (($flag_name == 'follow_organizations') and (!$conf['tm_unapproved_follow_company']) and (!in_array('approved user', $user->roles))) {
+        $limit_unapproved = true;
+      }
+    }
+
+    if ($limit_unapproved) {
+      $variables['link_href'] = '';
+      $variables['flag_button_class'] = 'flag-limit follow bttn bttn-secondary bttn-m';
+      drupal_add_js('
+      var tm_follow_restricted_prompt = false;
+      jQuery(document).ready(function($) {
+        
+        $( ".flag-limit" ).click(function() {
+
+          if (tm_follow_restricted_prompt) { return; }
+          tm_follow_restricted_prompt = true;
+
+          var message = "<strong>How can I follow other members?</strong><br>Unlock this feature by completing your profile and <a href=\"javascript:jq_request_approval(' . $user->uid . ')\" class=\"approval-link\">requesting verification</a> of your account.";
+          $.prompt(message, {
+            title: "This feature is for Verified Members",
+            buttons: {"OK": false}, 
+            loaded: function() { 
+              $("#main").addClass("tm-blur-filter");
+            },
+            close: function() { 
+              $("#main").removeClass("tm-blur-filter");
+              tm_follow_restricted_prompt = false;
+            }
+          });
+        }); 
+      });
+      ', 'inline');
+    }
+    else if(isset($tm_limit)) {
+      $variables['link_href'] = '';
+      $display_upvotes = $conf["tm_organizations_upvote"];
+      $variables['flag_button_class'] = 'flag-limit follow bttn bttn-secondary bttn-m';
+      if (($display_upvotes) and ($flag_name == "follow_organizations")) {
+        $variables['flag_button_class'] = 'flag-limit follow bttn bttn-secondary bttn-m upvote';
+      }
+      drupal_add_js('
+      jQuery(document).ready(function($) {
+        $( ".flag-limit" ).unbind().click(function() {
+          var message = $( ".flag-limit span.flag-action" ).text();
+          jq_alert("Limit reached", "Sorry, you can\'t perform this action.");
+        }); 
+      });
+      ', 'inline');
+    }  
+  }
+}
+
+/* 
+ * Developer Helper method to recaulcate flag counts
+ * Only use this if the flag_counts table gets out of sync 
+ * This can happen when developing with flag hooks
+ * https://www.drupal.org/files/me-flag-counts.patch
+ */
+function _tm_flags_fix_flag_counts() {
+
+  $query = db_select('flagging', 'fc')
+   ->fields('fc', array('fid', 'entity_type', 'entity_id'));
+  $query->addExpression('COUNT(fid)', 'fcid_cnt');
+  $result = $query->groupBy('fid')
+    ->groupBy('entity_type')
+    ->groupBy('entity_id')
+    ->execute();
+  foreach ($result as $row) {
+    db_merge('flag_counts')
+      ->key(array(
+        'fid' => $row->fid,
+        'entity_type' => $row->entity_type,
+        'entity_id' => $row->entity_id,
+      ))
+      ->fields(array(
+        'count' => $row->fcid_cnt,
+        'last_updated' => REQUEST_TIME,
+      ))
+      ->execute();
+    }
+
+  drupal_set_message("(Developer) flag_count table updated");
+
+}
+
+/**
+ * Lookup if an entity has been flagged by anyone
+ * flag->is_flagged() can only check if entity is flagged by a particular user
+ */
+function tm_flags_is_entity_flagged($entity_type, $entity_id, $flag_name = null, $flag_id = null) {
+  
+  // load flag
+  if ($flag_id == null) {
+    $flag = flag_get_flag($flag_name, NULL);
+    $flag_id = $flag->fid;
+  }
+
+  $query = "SELECT entity_id FROM {flagging} f WHERE f.fid = :fid AND f.entity_type=:entity_type AND f.entity_id=:entity_id";
+  $flagged_entries = db_query($query, array(':fid' => $flag_id, ':entity_type' => $entity_type, ':entity_id' => $entity_id))->fetchAll();
+  
+  // check if flagged
+  if (sizeof($flagged_entries) > 0) {
+    return true;
+  }
+
+  // not flagged
+  return false;
+}
+

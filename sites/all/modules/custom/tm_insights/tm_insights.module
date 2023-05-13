@@ -1,0 +1,380 @@
+<?php
+
+// tm_insights.module
+
+include_once 'tm_insights.display.inc';
+
+/**
+ * Implement hook_menu()
+ */
+function tm_insights_menu() {
+
+   $items = array();
+
+   $items['insights'] = array(
+    'title' => 'Community Insights',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('tm_insights_form'),
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+   );
+
+   $items['insights/callbacks/reach'] = array(
+      'page callback' => 'tm_insights_reach_results',
+      'access arguments' => array('access content')
+   );
+
+   return $items;
+}
+
+
+/**
+ * Show reach widget
+ */
+function tm_insights_form() {
+  
+  global $conf;
+
+  // load js
+  drupal_add_js('https://www.google.com/jsapi', 'external');
+  drupal_add_js(drupal_get_path('module', 'tm_insights') . '/js/tm_insights.js');
+  drupal_add_js(drupal_get_path('module', 'tm_insights') . '/lib/js/chosen.jquery.min.js');
+  drupal_add_js(drupal_get_path('module', 'tm_insights') . '/lib/js/chosen.jquery.min.js');
+  
+  // Load css
+  drupal_add_css(drupal_get_path('module', 'tm_insights') . '/lib/css/chosen.min.css');
+  drupal_add_css(drupal_get_path('module', 'tm_insights') . '/css/tm_insights.css');
+ 
+  // Start html
+  $html = "";
+  $redraw_functions = array("drawChart", "chapters_insights");
+  $html .= _tm_insights_js_redraw_function($redraw_functions);
+
+  // Start article
+  $html .= "<article class='trilithon node view-mode-full node-by-viewer clearfix'>";
+
+  $region_names = tm_base_get_all_regions();
+
+  $query = "SELECT field_data_field_country.entity_id, node.title, countries_country.name as country, countries_country.iso2 as iso2, countries_country.continent as region 
+  FROM field_data_field_country 
+  LEFT JOIN countries_country ON countries_country.iso2 = field_data_field_country.field_country_iso2 
+  LEFT JOIN node ON field_data_field_country.entity_id = node.nid 
+  WHERE field_data_field_country.bundle = 'chapter' AND field_data_field_country.deleted = 0 ORDER BY countries_country.continent, countries_country.iso2";
+  $all_chapters = db_query($query)->fetchAll();
+
+  $chapter_uids = array();
+
+  $regions = tm_base_get_all_regions();
+
+  $html .= '<div id="insightsInput">';
+  $html .= '<h1>Community Insights</h1>';
+  $html .= '<select multiple class="insightsSelect">';
+  $html .= '<option value="ALL-CHAPTERS">Worldwide &gt; All Chapters</option>';
+
+  $last_region = null;
+  $last_country = null;
+  for ($i = 0; $i < sizeof($all_chapters); $i++) {
+
+    $chapter = $all_chapters[$i];
+
+    // All Countries in Region
+    if ($chapter->region != $last_region) {
+      $last_region = $chapter->region;
+      $html .= '<option value="REGION-' . $chapter->region . '">' . $region_names[$chapter->region] . ' &gt; All Chapters</option>';
+    }
+
+    // All Chapters in Country
+    if ($chapter->country != $last_country) {
+      $last_country = $chapter->country;
+      if ($i < sizeof($all_chapters) -1) {
+        if ($all_chapters[$i+1]->country == $last_country) {
+          $html .= '<option value="COUNTRY-' . $chapter->iso2 . '">' . $region_names[$chapter->region] . ' &gt; ' . $chapter->country . ' &gt; All Chapters</option>';
+        }
+      }
+    }
+
+    // Europe > Montenegro (ie: chapter is country)
+    if ($chapter->country == $chapter->title) {
+       $html .= '<option value="CHAPTER-' . $chapter->entity_id . '">' . $region_names[$chapter->region] . ' &gt; ' . $chapter->country . '</option>';
+     } else {
+      // Europe > United Kingdom > London
+       $html .= '<option value="CHAPTER-' . $chapter->entity_id . '">' . $region_names[$chapter->region] . ' &gt; ' . $chapter->country . ' &gt; ' . $chapter->title . '</option>';
+     }
+   
+
+  }
+
+  $html .= '</select>';
+  $html .= "</div>";
+
+  $html .= '<div id="insightsResults"></div>';
+
+  if (module_exists("tm_nps")) {
+      $html .= "<center><span class='insightsNPS' style='font-size: smaller; color: #888;'>We love data. Feel free to <a href='/feedback'>share your feedback</a> with us.</span></center>";
+  }
+
+  $html .= "</article>";
+
+  $form['html'] =  array(
+    '#type' => 'markup',
+    '#markup' => $html);
+
+  return $form;
+
+}
+
+
+/**
+ * Show reach results
+ */
+function tm_insights_reach_results() {
+
+  global $conf;
+  $titles = array();
+  $html = "";
+
+  $region_names = tm_base_get_all_regions();
+  $country_names = tm_base_get_all_country_names();
+
+  // STEP 1. PARSE INPUT DATA
+  $chapter_ids = array();
+  $all_chapters = false;
+  $all_chapters_in = false;
+
+  if (isset($_GET["chapters"])) {
+    if (is_array($_GET["chapters"])) {
+      foreach ($_GET["chapters"] as $input) {
+
+        // ALL-CHAPTERS
+        if ((strpos($input, "ALL-CHAPTERS")) === 0) {
+          $ids = tm_chapters_get_all_chapters();
+          $all_chapters = true;
+          $all_chapters_in = true;
+          foreach ($ids as $id) {
+            $chapter_ids[] = $id;
+          }
+        }
+
+        // REGION-OC, REGION-NA, etc
+        if ((strpos($input, "REGION-")) === 0) {
+          $parts = explode("REGION-", $input);
+          if (sizeof($parts) > 1) {
+            $titles[] = strtoupper($region_names[$parts[1]]);
+            $ids = _tm_chapters_get_chapters_in_continent(strip_tags($parts[1]));
+            $all_chapters_in = true;
+            foreach ($ids as $id) {
+              $chapter_ids[] = $id;
+            }
+          }
+        }
+
+        // COUNTRY-AU, COUNTRY-US, etc
+        if ((strpos($input, "COUNTRY-")) === 0) {
+          $parts = explode("COUNTRY-", $input);
+          if (sizeof($parts) > 1) {
+            $titles[] = $country_names[$parts[1]];
+            $ids = _tm_chapters_get_chapters_in_country(strip_tags($parts[1]));
+            $all_chapters_in = true;
+            foreach ($ids as $id) {
+              $chapter_ids[] = $id;
+            }
+          }
+        }
+
+        // CHAPTER-123, CHAPTER-124, etc
+        if ((strpos($input, "CHAPTER-")) === 0) {
+          $parts = explode("CHAPTER-", $input);
+          if (sizeof($parts) > 1) {
+            if (is_numeric($parts[1])) {
+              $chapter = node_load($parts[1]);
+              if ($chapter != null) {
+                if ($chapter->type == "chapter") {
+                  $titles[] = strip_tags(strtoupper($chapter->title));
+                  $chapter_ids[] = $parts[1];
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // default to global
+  if (sizeof($chapter_ids) == 0) {
+    $chapter_ids = tm_chapters_get_all_chapters();
+    $all_chapters = true;
+  }
+
+  // remove duplicates
+  $chapter_ids = array_unique($chapter_ids);
+
+  // STEP 2. FETCH CHAPTER INSIGHTS
+  $insights = array();
+
+ 
+  // fetch chapter stats
+  if ($all_chapters) {
+    $chapter_insights = _tm_reports_get_global_insights();
+  } else {
+    $chapter_insights = _tm_reports_get_chapter_insights($chapter_ids, true);
+  }
+
+  // total members
+  $insights[] = array("Total members", $chapter_insights['data_values']['members_total']);
+
+  // chapters
+  if (sizeof($chapter_ids) > 1) {
+    $insights[] = array("Chapters", sizeof($chapter_ids));
+  }
+
+  // company pages
+  if (isset($chapter_insights['data_values']['num_organizations'])) {
+    $insights[] = array("Company pages", $chapter_insights['data_values']['num_organizations']);
+  }
+
+  // connections
+  if ($all_chapters) {
+    $insights[] = array("Member connections", $chapter_insights['data_values']['num_connections']);
+  } else {
+    $insights[] = array("Member connections", $chapter_insights['data_values']['total_chapter_member_connections']);
+  }
+
+  // net promoter score
+  if (isset($conf["tm_insights_show_nps"])) {
+    if (isset($chapter_insights['data_values']['net_promoter_score'])) {
+      if (($chapter_insights['data_values']['net_promoter_score'] != null) and ($chapter_insights['data_values']['net_promoter_score'] > 0)) {
+        $insights[] = array("Net Promoter Score", $chapter_insights['data_values']['net_promoter_score']);
+      }
+    }
+  }
+
+
+  // event info
+  $insights[] = array("Event registrations (all time)", $chapter_insights['data_values']['num_event_registrations']);
+  if ($chapter_insights['data_values']['avg_event_registeration_frequency'] > 0) {
+    $insights[] = array("Events per attendee (average)", $chapter_insights['data_values']['avg_event_registeration_frequency']);
+  }
+  if ($chapter_insights['data_values']['num_events_upcoming'] > 0) {
+    $insights[] = array("Upcoming events", $chapter_insights['data_values']['num_events_upcoming']);
+  }
+  $insights[] = array("Events in past 12 months", $chapter_insights['data_values']['num_events_past_12_months']);
+
+  // STEP 3. FETCH DATA
+  $industry_insights = array();
+
+  // get segment stats
+  if ($all_chapters) {
+    $chapter_ids = "";
+  }
+
+  // industry data
+  $members_with_segment_pct = $chapter_insights['data_values']['members_with_segment_pct'];
+  
+  // segments
+  $industry_data = _tm_reports_get_industry_segment_data($chapter_ids);
+  $total = 1;
+  foreach ($industry_data as $data) {
+    $total = $total + $data['total'];
+  }
+  $normalize = $chapter_insights['data_values']['members_total']/$total;
+  foreach($industry_data as $data) {
+    $industry_insights[] = array($data['name'], intval($data['total'] * $normalize));
+  }
+
+  // STEP 4. GENERATE TITLE
+  $title_text = implode(" + ", $titles);
+  if ($all_chapters) {
+    $title_text = "ALL CHAPTERS";
+  }
+
+  // STEP 5. RENDER INSIGHTS
+  $html .= "<section class='contained contained-block'>";
+  $html .= "<header class='contained-head'>
+            <h1 class='prime-title'>MEMBERSHIP &gt; " . $title_text . "</span></h1>";
+  $html .= "</header>";
+  $html .= _tm_insights_table_html($insights, "chapters_insights", "number");
+  $html .= "</section>";
+
+  // STEP 6. RENDER INDUSTRY SEGMENTATION
+  if (sizeof($industry_data) > 0) {
+    $html .= "<section class='contained contained-block'>";
+    $html .= "<header class='contained-head'>
+              <h1 class='prime-title'>Industry Membership &gt; " . $title_text . "</span></h1>";
+    $html .= "</header>";
+    $html .= _tm_insights_table_html($industry_insights, "segment_insights", "number", 1, "false");
+    $html .= "</section>";
+
+    $html .= "<section class='contained contained-block'>";
+    $html .= "<header class='contained-head'>
+              <h1 class='prime-title'>Visual &gt; " . $title_text . "</span></h1>";
+    $html .= "</header>";
+    $html .= _tm_insights_segments_html($industry_data, $normalize);
+    $html .= "</section>";
+  }
+
+  // STEP 7. INFO
+  if (isset($conf["tm_insights_public_message"])) {
+    $html .= "<section class='contained contained-block'>";
+    $html .= "<header class='contained-head'>
+              <h1 class='prime-title'>" . $conf["tm_insights_public_heading"] . "</h1>";
+    $html .= "</header>";
+    $html .= "<div class='insightsMessage'>" . $conf["tm_insights_public_message"] . "</div>";
+    $html .= "</section>";
+  }
+ 
+  // output html
+  echo $html;
+  drupal_exit();
+
+}
+
+/**
+ * Add html meta tags
+ * Called from tm/themes/template.php
+ */
+function tm_insights_preprocess_html(&$variables, $hook) {
+
+  global $conf;
+
+  if (current_path() != "insights") {
+    return;
+  }
+  
+  // og:image
+  if (isset($conf['tm_insights_og_image'])) {
+    $meta = array(
+      '#tag' => 'meta', 
+      '#attributes' => array(
+        'name' => 'og:image', 
+        'content' => $conf['tm_insights_og_image'],
+      ),
+    );
+    drupal_add_html_head($meta, 'og:image');
+  }
+
+  // description
+  if (isset($conf['tm_insights_og_description'])) {
+    $meta = array(
+      '#tag' => 'meta', 
+      '#attributes' => array(
+        'name' => 'description',
+        'property' => 'og:description',
+        'content' => $conf['tm_insights_og_description'],
+      ),
+    );
+    drupal_add_html_head($meta, 'description');
+  }
+
+}
+
+/**
+ * Helper method
+ */
+function tm_insights_pluralize_members($num) {
+  if ($num == 1) {
+    return "member";
+  } else {
+    return "members";
+  }
+}

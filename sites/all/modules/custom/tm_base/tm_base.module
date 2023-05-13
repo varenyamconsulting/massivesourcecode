@@ -1,0 +1,1014 @@
+<?php
+/**
+ * @file
+ * Code for the TM Base feature.
+ */
+
+include_once 'tm_base.features.inc';
+include_once 'tm_base.admin.inc';
+include_once 'includes/Parsedown.php';
+
+/**
+ * Implements hook_menu().
+ */
+function tm_base_menu() {
+  $items = array();
+
+  $items['frontpage'] = array(
+    'page callback' => '_tm_base_frontpage',
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+  );
+  
+  // Base Admin page.
+  $items['admin/config/tm'] = array(
+    'title' => 'Travel Massive',
+    'description' => 'Settings related to the Travel Massive website.',
+    'type' => MENU_NORMAL_ITEM,
+    'page callback' => 'system_admin_menu_block_page',
+    'access arguments' => array('manage tm settings'),
+    'file' => 'system.admin.inc',
+    'file path' => drupal_get_path('module', 'system'),
+  );
+
+  return $items;
+}
+
+// Placeholder for blog so we can add menu item
+function tm_base_blog() {
+  return;
+}
+
+/**
+ * Implements hook_permission()
+ */
+function tm_base_permission() {
+  return array(
+    'manage tm settings' => array(
+      'title' => t('Manage TM settings'),
+      'description' => t('Manage Travel Massive settings.'),
+    ),
+  );
+}
+
+/**
+* Implements hook_form_alter().
+*/
+function tm_base_form_alter(&$form, &$form_state, $form_id) {
+  // Add a cancel link to the node and user forms.
+  if (isset($form['#node']) || isset($form['#user'])) {
+    // If destination is set, redirect there
+    if (isset($_GET['destination'])) {
+      $url = $_GET['destination'];
+    }
+    // If edit form of existing node, redirect to node
+    elseif (isset($form['#node']) && isset($form['#node']->nid)) {
+      $url = 'node/' . $form['#node']->nid;
+    }
+    // If edit form of existing user, redirect to user
+    elseif (isset($form['#user']) && $form['#user']->uid != 0) {
+      $url = 'user/' . $form['#user']->uid;
+    }
+    // Everything else, go to frontpage
+    else {
+      $url = '<front>';
+    }
+    // Add the cancel link.
+    $form['actions']['cancel'] = array(
+      '#markup' => l(t('Cancel'), $url, array('attributes' => array('class' => array('bttn', 'bttn-tertiary', 'bttn-m', 'cancel')))),
+      '#weight' => 15,
+    );
+  }
+}
+
+/**
+ * Implements hook_block_info()
+ */
+function tm_base_block_info() {
+  $blocks['tm_homepage_stats'] = array(
+    'info' => t('Homepage stats'),
+    'cache' => DRUPAL_CACHE_PER_USER
+  );
+
+  return $blocks;
+}
+
+/**
+ * Implements hook_block_view()
+ */
+function tm_base_block_view($delta) {
+  global $user;
+
+  $block = array();
+  switch ($delta) {
+    case 'tm_homepage_stats':
+
+      $block['content'] = '<ul>';
+
+      // logged in
+      if ($user->uid) {
+        $follow_members_flag = flag_get_flag('follow_members');
+        // Number of followers and following.
+        $followers = $follow_members_flag->get_count($user->uid);
+        $following = flag_get_user_flag_counts($follow_members_flag, $user);
+
+        // format stats
+        $followers = tm_base_stats_format($followers);
+        $following = tm_base_stats_format($following);
+
+        $block['content'] .= '<li><a href="' . url('user/' . $user->uid . '/followers') . '" title="' . t('View followers') . '"><strong class="key">' . t('Followers') . '<small>: </small></strong><span class="value">' . $followers . '</span></a></li>';
+        $block['content'] .= '<li><a href="' . url('user/' . $user->uid . '/following') . '" title="' . t('View following') . '"><strong class="key">' . t('Following') . '<small>: </small></strong><span class="value">' . $following . '</span></a></li>';
+      }
+      else {
+
+        // logged out stats
+        global $conf;
+        $show_stats = array("members", "chapters", "organizations");
+        if (isset($conf["tm_frontpage_show_anon_stats"])) {
+          $show_stats = $conf["tm_frontpage_show_anon_stats"];
+        }
+
+        // cache block for front page
+        $cache = cache_get('tm-front-page-stats-anon', 'cache');
+        if (!empty($cache)) {
+          $block['content'] = $cache->data;
+          return $block;
+        }
+
+        // Member label for displaying membership counts
+        $members_label = $conf["tm_members_label"];
+
+        // Number of members
+        if (array_search("members", $show_stats) !== false) {
+          $no_community = db_query('SELECT count(uid) AS no FROM {users} WHERE status = :status', array(':status' => 1))->fetchField();
+          $no_community = tm_base_stats_format($no_community);
+
+          $block['content'] .= '<li><a href="' . url('community') . '" title="' . t('Go to community') . '"><strong class="key">' . t(ucwords($members_label)) . '<small>: </small></strong><span class="value">' . $no_community . '</span></a></li>';
+        }
+
+        // Number of chapters
+        if (array_search("chapters", $show_stats) !== false) {
+          $no_chapter = db_query('SELECT count(nid) AS no FROM {node} WHERE status = :status AND type = :type', array(':status' => 1, ':type' => 'chapter'))->fetchField();
+          $no_chapter = tm_base_stats_format($no_chapter);
+
+          $block['content'] .= '<li><a href="' . url('chapters') . '" title="' . t('Go to chapters') . '"><strong class="key">' . t('Chapters') . '<small>: </small></strong><span class="value">' . $no_chapter . '</span></a></li>';
+        }
+
+        // Number of organizations
+        if (array_search("organizations", $show_stats) !== false) {
+          $no_company = db_query('SELECT count(nid) AS no FROM {node} WHERE status = :status AND type = :type', array(':status' => 1, ':type' => 'organization'))->fetchField();
+          $no_company = tm_base_stats_format($no_company);
+
+          $block['content'] .= '<li><a href="' . url('companies') . '" title="' . t('Go to companies') . '"><strong class="key">' . t('Companies') . '<small>: </small></strong><span class="value">' . $no_company . '</span></a></li>';
+        }
+
+        // Number of connections (member + organization follows)
+        if (array_search("connections", $show_stats) !== false) {
+
+          // following members
+          $follow_flag = flag_get_flag('follow_members', NULL);
+          $query = "SELECT COUNT(*) total FROM {flagging} f WHERE f.fid = :fid";
+          $no_member_follows = db_query($query, array(':fid' => $follow_flag->fid))->fetch()->total;
+
+          // following organizations
+          $follow_flag = flag_get_flag('follow_organizations', NULL);
+          $query = "SELECT COUNT(*) total FROM {flagging} f WHERE f.fid = :fid";
+          $no_organization_follows = db_query($query, array(':fid' => $follow_flag->fid))->fetch()->total;
+
+          $no_connections = $no_member_follows + $no_organization_follows;
+
+          $no_connections = tm_base_stats_format($no_connections);
+
+          $block['content'] .= '<li><a href="' . url('community') . '" title="' . t('Go to community') . '"><strong class="key">' . t('Connections') . '<small>: </small></strong><span class="value">' . $no_connections . '</span></a></li>';
+
+        }
+
+        // Number of mutual followers
+        if (array_search("mutual_follows", $show_stats) !== false) {
+          $follow_flag = flag_get_flag('follow_members', NULL);
+          $query = "select count(distinct flagging.uid, f2.uid) as total from flagging inner join flagging as f2 on flagging.uid = f2.entity_id where flagging.fid = :fid and f2.fid = :fid order by flagging.uid";
+          $no_mutual_follows = db_query($query, array(':fid' => $follow_flag->fid))->fetch()->total;
+          $no_mutual_follows = tm_base_stats_format($no_mutual_follows);
+
+          $block['content'] .= '<li><a href="' . url('community') . '" title="' . t('Go to community') . '"><strong class="key">' . t('Friends') . '<small>: </small></strong><span class="value">' . $no_mutual_follows . '</span></a></li>';
+        }
+
+        // cache anon block for 15 minutes
+        $cache_block = $block['content'] . '</ul>';
+        cache_set('tm-front-page-stats-anon', $cache_block, 'cache', time() + 900); // 15 mins
+
+      }
+
+      $block['content'] .= '</ul>';
+      break;
+  }
+
+  return $block;
+}
+
+/**
+ * Helper to return formatted number for display
+ * ie: 80, 1.1k, 3.0k, etc.
+ */
+function tm_base_stats_format($num) {
+
+  // less than a thousand
+  if ($num < 1000) {
+    return $num;
+  }
+
+  // less than 50,000
+  if ($num < 50000) {
+    $k_format = floor(round(($num / 1000.0)*10,2)) / 10 . "k";
+  }
+
+  // more than 50,000 (omit decimal)
+  if ($num >= 50000) {
+    $k_format = floor(floor(round(($num / 1000.0)*10,2)) / 10) . "k";
+  }
+
+  return $k_format;
+}
+
+/**
+ * Implements hook_theme()
+ */
+function tm_base_theme() {
+
+  global $conf;
+
+  $items = array();
+
+  $items['_tm_homepage'] = array(
+    'variables' => array(
+      'homepage_title' => NULL,
+      'homepage_description' => NULL,
+      'homepage_stats_block' => NULL,
+      'homepage_upcoming_events' => NULL
+    ),
+    'template' => 'tm_base_homepage',
+    'path' => drupal_get_path('module', 'tm_base') . '/templates/'
+  );
+
+  if (isset($conf["tm_users_custom_signup_page"])) {
+    if ($conf["tm_users_custom_signup_page"]) {
+      $items['user_register_form'] = array(
+      'render element' => 'form',
+      'template' => 'user-register',
+      'path' => drupal_get_path('theme', 'tm') . '/templates',
+      'preprocess functions' => array('tm_base_preprocess_custom_user_register_form'),
+      );
+    }
+  }
+
+  return $items;
+}
+
+/**
+ * Preprocess custom user register form
+ */
+function tm_base_preprocess_custom_user_register_form(&$vars) {
+  $args = func_get_args();
+  array_shift($args);
+  $form_state['build_info']['args'] = $args; 
+  $vars['content_attributes_array']['class'][] = 'content';
+  $vars['title_attributes_array']['class'][] = 'content';
+  $vars['attributes_array']['class'][] = 'content';
+  $vars['classes_array'] = array('content');
+  $vars['form'] = drupal_build_form('user_register_form', $form_state['build_info']['args']);
+}
+
+/**
+ * Custom function to build the frontpage
+ */
+function _tm_base_frontpage() {
+
+  global $conf;
+  global $user;
+
+  // if user has deleted their account, set cookie so we can prevent page from being cached for other visitors
+  if (!user_is_logged_in()) {
+    $messages = drupal_get_messages('status', false);
+    if (isset($messages['status'])) {
+      foreach ($messages['status'] as $message) {
+        // set from user_cancel_password_confirm_submit()
+        if ($message == 'Your account has been canceled.') {
+          user_cookie_save(array('tm_canceled_account'=>1));
+        }
+      }
+    }
+  }
+
+  // Remove the title.
+  drupal_set_title('');
+
+  if ($user->uid) {
+    $homepage_title = $conf['tm_frontpage_title_members'];
+    $homepage_description = $conf['tm_frontpage_description_members'];
+    $is_verified = in_array("approved user", $user->roles);
+    if ($is_verified and isset($conf['tm_frontpage_description_approved'])) {
+      $homepage_description = $conf['tm_frontpage_description_approved'];
+    }
+  }
+  else {
+    $homepage_title = $conf['tm_frontpage_title_anon'];
+    $homepage_description = $conf['tm_frontpage_description_anon'];
+  }
+
+  // Replace tokens.
+  $homepage_title = token_replace($homepage_title);
+  $homepage_description = token_replace($homepage_description);
+
+  if (!$homepage_title) {
+    drupal_set_message('No homepage title. Set it through ' . l('configuration', 'admin/config/system/site-information'), 'error');
+  }
+  if (!$homepage_description) {
+    drupal_set_message('No homepage description. Set it through ' . l('configuration', 'admin/config/system/site-information'), 'error');
+  }
+
+  // Stats block
+  $stats_block = block_load('tm_base', 'tm_homepage_stats');
+  $homepage_stats_block = _block_get_renderable_array(_block_render_blocks(array($stats_block)));
+
+  // Upcoming events view.
+  $homepage_upcoming_events = array();
+  $view_display = 'front_block';
+  $view = views_get_view('events');
+  $view->set_display($view_display);
+  if ($view && $view->access($view_display)) {
+    $homepage_upcoming_events['title'] = $view->get_title();
+    $homepage_upcoming_events['content'] = $view->preview($view_display);
+  }
+
+  return theme('_tm_homepage', array(
+    'homepage_title' => html_entity_decode($homepage_title, ENT_QUOTES),
+    'homepage_description' => $homepage_description,
+    'homepage_stats_block' => $homepage_stats_block,
+    'homepage_upcoming_events' => $homepage_upcoming_events
+  ));
+}
+
+/**
+ * Implements hook_token_info().
+ */
+function tm_base_token_info() {
+  $info['tokens']['node']['friendly_url_org'] = array(
+    'name' => t('Friendly URL'),
+    'description' => t('This will return a properly formatted friendly url for an organization'),
+  );
+  $info['tokens']['user']['friendly_url_user'] = array(
+    'name' => t('Friendly URL'),
+    'description' => t('This will return a properly formatted friendly url for a user'),
+  );
+  return $info;
+}
+
+/**
+ * Implements hook_tokens(). This hook will operate the token and replace it with it's value.
+ */
+function tm_base_tokens($type, $tokens, array $data = array(), array $options = array()) {
+  $replacements = array();
+
+  if ($type == 'node') {
+    $node = $data['node'];
+    // Loop through each of the available tokens.
+    foreach ($tokens as $name => $original) {
+      // Find the desired token by name
+      switch ($name) {
+        // Token that can be used to build the friendly url for organizations. If the field
+        // is not set, it defaults to the title.
+        case 'friendly_url_org':
+          $new = '';
+          if ($node->type == 'organization') {
+            if (isset($node->field_friendly_url['und'][0]['value']) && $node->field_friendly_url['und'][0]['value']) {
+              $new = $node->field_friendly_url['und'][0]['value'];
+            } else {
+              $new = 'companies/' . $node->title;
+            }
+          }
+          $replacements[$original] = $new;
+          break;
+      }
+    }
+  }
+  if ($type == 'user') {
+
+    if (!isset($data['user'])) {
+      return $replacements;
+    }
+
+    $user = $data['user'];
+
+    // Loop through each of the available tokens.
+    foreach ($tokens as $name => $original) {
+      // Find the desired token by name
+      switch ($name) {
+        // Token that can be used to build the friendly url for users. If the field
+        // is not set, it defaults to the title.
+        case 'friendly_url_user':
+          $new = '';
+          if (isset($user->field_friendly_url['und'][0]['value']) && $user->field_friendly_url['und'][0]['value']) {
+            $new = $user->field_friendly_url['und'][0]['value'];
+          } else {
+            $new = 'community/' . $user->name;
+          }
+          $replacements[$original] = $new;
+          break;
+      }
+    }
+  }
+  return $replacements;
+}
+
+/**
+ * Implements hook_field_group_formatter_info().
+ */
+function tm_base_field_group_formatter_info() {
+  $info = array(
+    'display' => array(
+      'contained_block' => array(
+        'label' => t('TM Contained block '),
+        'description' => t('This fieldgroup renders the content in a section with a header.'),
+        'format_types' => array('open'),
+        'default_formatter' => 'open',
+      ),
+    ),
+  );
+
+  return $info;
+}
+
+/**
+ * Implements hook_field_group_pre_render().
+ *
+ * @param Array $elements by address.
+ * @param Object $group The Field group info.
+ */
+function tm_base_field_group_pre_render(&$element, $group, &$form) {
+  switch ($group->format_type) {
+
+    // default
+    case 'contained_block':
+      $add = array(
+        '#type' => 'markup',
+        '#weight' => $group->weight,
+      );
+
+      // default group label
+      $group_label = $group->label;
+
+      // if featured members, override
+      // ie: Speakers, Workshop Leaders, etc
+      global $conf;
+      if ($group->label == "Featured Members") {
+        if (isset($element['field_event_featured_members']['#object'])) {
+          $event = $element['field_event_featured_members']['#object']; //->nid;
+          $event_type = $event->field_event_type[LANGUAGE_NONE][0]['value'];
+
+          // fetch from event setting
+          $group_label = "";
+          if (sizeof($event->field_event_featured_label) > 0) {
+            $group_label = trim($event->field_event_featured_label[LANGUAGE_NONE][0]['value']);
+          }
+          // not specified
+          if ($group_label == "") {
+            if (isset($conf["tm_featured_members_event_types"][$event_type])) {
+              $group_label = $conf["tm_featured_members_event_types"][$event_type];
+            } else {
+              // default all
+              $group_label = "Special Guests";
+            }
+          }
+          
+        }
+      }
+     
+      $add['#prefix'] = '<section class="contained contained-block">
+        <header class="contained-head">
+          <h1 class="prime-title">' . check_plain(t($group_label)) . '</h1>
+        </header>
+        <div class="contained-body">';
+      $add['#suffix'] = '</div></section>';
+
+      $element += $add;
+
+      break;
+    }
+}
+
+/**
+ * Implements hook_ds_field_theme_functions_info().
+ */
+function tm_base_ds_field_theme_functions_info() {
+  return array(
+    'theme_ds_field_dl' => t('TM Definition list item'),
+    'theme_ds_field_tm_default' => t('TM default field'),
+    'theme_ds_field_tm_default_markdown' => t('TM default field (with Markdown)')
+  );
+}
+
+/**
+ * Field theming function. Output a definition list item
+ */
+function theme_ds_field_dl($variables) {
+  $output = '';
+
+  // Since a dd can't exist without a dt, we just print the title without checking if the label's hidden.
+  $output .= '<dt>' . $variables['label'] . '</dt>';
+  foreach ($variables['items'] as $delta => $item) {
+    $output .= '<dd class="' . $variables['field_name_css'] . '">' . drupal_render($item) . '</dd>';
+  }
+
+  return $output;
+}
+
+/**
+ * Field theming function. Output the default TM field
+ */
+function theme_ds_field_tm_default($variables) {
+  $output = '';
+
+  $output .= '<div class="detail-item ' . $variables['field_name_css'] . '"><h2>' . $variables['label'] . '</h2>';
+  foreach ($variables['items'] as $delta => $item) {
+    $rendered_item = drupal_render($item);
+    $rendered_item = str_replace("\n", "<br>", $rendered_item); // add line breaks
+    $rendered_item = preg_replace("/[-]{4,10}/", "<div class='tm_field_hr'></div>", $rendered_item); // replace ---- with hr
+    $output .= tm_base_linkify($rendered_item, ["http", "https", "mail", "twitter"], ["rel" => "nofollow noopener", "target" => "_blank"]); // add links
+  }
+  $output .= '</div>';
+
+  return $output;
+}
+
+/**
+ * Field theming function. Output the default TM field with markdown
+ */
+function theme_ds_field_tm_default_markdown($variables) {
+
+  global $conf;
+
+  // by default, don't parse markdown
+  $markdown_allowed = false;
+
+  // get field entity type and id
+  $entity_type = null;
+  $entity_id = null;
+
+  if (isset($variables['element']['#object']->uid)) {
+    $entity_id = $variables['element']['#object']->uid;
+    $entity_type = $variables['element']['#bundle'];
+  }
+
+  if (isset($variables['element']['#object']->nid)) {
+    $entity_id = $variables['element']['#object']->nid;
+    $entity_type = $variables['element']['#bundle'];
+  }
+
+  // check markdown allowed
+  $markdown_allowed = tm_base_check_markdown_permission($entity_type, $entity_id);
+
+  // render with default if markdown not allowed
+  if (!$markdown_allowed) {
+    return theme_ds_field_tm_default($variables);
+  }
+
+  // return markdown
+  $output = '';
+
+  $output .= '<div class="detail-item ' . $variables['field_name_css'] . '"><h2>' . $variables['label'] . '</h2>';
+  foreach ($variables['items'] as $delta => $item) {
+    $rendered_item = drupal_render($item); // will make any html tags entities
+    $rendered_item = str_replace("&gt;", ">", $rendered_item); // replace &gt; with > so we can do quotes
+    $rendered_item = str_replace("&quot;", "\"", $rendered_item); // replace &gt; with > so we can do quotes
+    $rendered_item = tm_base_parsedown($rendered_item, "", true); // markdown and don't escape html (it's escaped in drupal_render)
+    $rendered_item = str_replace("\n", "<br>", $rendered_item); // add line breaks
+    $rendered_item = str_replace("<br><", "<", $rendered_item); // remove <br> before open tag, ie: <br><p>, <br><h2>, etc.
+
+    $output .= tm_base_linkify($rendered_item, ["http", "https", "mail", "twitter"], ["rel" => "nofollow noopener", "target" => "_blank"]); // add links
+  }
+  $output .= '</div>';
+
+  return $output;
+}
+
+/**
+ * Turn any links in the text into urls
+ * see: https://gist.github.com/jasny/2000705
+ */
+function tm_base_linkify($value, $protocols = array('http', 'mail'), array $attributes = array())
+{
+    // Link attributes
+    $attr = '';
+    foreach ($attributes as $key => $val) {
+      if ($val != "") {
+        $attr .= ' ' . $key . '="' . htmlentities($val) . '"';
+      }
+    }
+    
+    $links = array();
+    
+    // Extract existing links and tags
+    $value = preg_replace_callback('~(<a .*?>.*?</a>|<.*?>)~i', function ($match) use (&$links) { return '<' . array_push($links, $match[1]) . '>'; }, $value);
+    
+    // Extract text links for each protocol
+    foreach ((array)$protocols as $protocol) {
+        switch ($protocol) {
+            case 'http':
+            case 'https':
+              $value = preg_replace_callback('~(?:(https?)://([^\s<]+)|(www\.[^\s<]+?\.[^\s<]+))(?<![\.,:\)])~i', function ($match) use ($protocol, &$links, $attr) { if ($match[1]) $protocol = $match[1]; $link = $match[2] ?: $match[3]; return '<' . array_push($links, "<a $attr href=\"$protocol://$link\">$link</a>") . '>'; }, $value); break;
+            case 'mail':    $value = preg_replace_callback('~([^\s<]+?@[^\s<]+?\.[^\s<]+)(?<![\.,:])~', function ($match) use (&$links, $attr) { return '<' . array_push($links, "<a $attr href=\"mailto:{$match[1]}\">{$match[1]}</a>") . '>'; }, $value); break;
+            case 'twitter':
+              $value = preg_replace_callback('~(?<!\w)[@#]([A-z]\w++)~', function ($match) use (&$links, $attr) { return '<' . array_push($links, "<a $attr href=\"https://twitter.com/" . ($match[0][0] == '@' ? '' : 'search/%23') . $match[1]  . "\">{$match[0]}</a>") . '>'; }, $value); break;
+            case 'newsfeed_hashtag': 
+              $attr = str_replace(' target="_blank"', "", $attr); // never open in new window
+              $value = preg_replace_callback('~(?<!\w)[#]([A-z]\w++)~', function ($match) use (&$links, $attr) { return '<' . array_push($links, "<a $attr href=\"/newsfeed/tags/" . $match[1]  . "\">{$match[0]}</a>") . '>'; }, $value); break;
+            case 'newsfeed_mention':
+              $attr = str_replace(' target="_blank"', "", $attr); // never open in new window
+              $value = preg_replace_callback('~(?<!\w)[@]([A-z]\w++)~', function ($match) use (&$links, $attr) { 
+                  // check account exists first
+                  if (tm_base_check_path_exists(strtolower($match[1]))) {
+                    return '<' . array_push($links, "<a $attr href=\"/" . $match[1]  . "\">{$match[0]}</a>") . '>';
+                  } else {
+                    return "@" . $match[1];
+                  }
+                }, $value); break;
+            default:
+              $value = preg_replace_callback('~' . preg_quote($protocol, '~') . '://([^\s<]+?)(?<![\.,:\)])~i', function ($match) use ($protocol, &$links, $attr) { return '<' . array_push($links, "<a $attr href=\"$protocol://{$match[1]}\">{$match[1]}</a>") . '>'; }, $value); break;
+        }
+    }
+    
+    // Insert all link
+    return preg_replace_callback('/<(\d+)>/', function ($match) use (&$links) { return $links[$match[1] - 1]; }, $value);
+}
+
+/**
+ * The helper function to detect original nid for the current page.
+ */
+function _orig_nid() {
+  $orig_path = _orig_path();
+  $node = menu_get_object('node', 1, $orig_path);
+  $nid = (isset($node) ? $node->nid : 0 );
+  return $nid;
+}
+
+/**
+ * The helper function to detect original path for the current page.
+ */
+function _orig_path() {
+  $url = arg(0).'/'.arg(1);
+  $path = (drupal_lookup_path('source', $url));
+  return $path;
+}
+
+/**
+ * Determine if path exists
+ * ref: https://eureka.ykyuen.info/2013/03/05/drupal-7-check-if-a-path-exists/
+ */
+function tm_base_check_path_exists($path) {
+  if (!drupal_valid_path($path)) {
+    // Not a system URL.
+    if (!drupal_lookup_path('source', $path)) {
+      // Not a path alias.
+      return false;
+    }
+  }
+
+  // exists
+  return true;
+}
+
+/**
+ * Implement hook_init
+ * Further restrict access to /admin paths to non-admins
+ * Silent redirect to home page if access denied
+ */
+function tm_base_init() {
+
+  global $conf;
+  global $user;
+
+  // only apply if user user is logged in
+  if (!user_is_logged_in()) {
+
+    // redirect if explicit /admin is requested
+    if (strtolower(request_path()) == "admin") {
+      drupal_goto("/");
+    }
+    return;
+  }
+
+  // whitelist of admin pages
+  // list of admin pages moderator is allowed to access
+  $moderator_allowed_admin_pages = array(
+    "/admin/branding",
+    "/admin/geoip_info",
+    "/admin/newsfeed/notification_preview",
+    "/admin/reports/status/rebuild",
+    "/admin/unapproved-members",
+    "/admin/member-testimonials",
+    "/admin/member-covid19-messages",
+    "/admin/company-covid19-messages",
+    "/admin/tm_reports",
+    "/admin/tm_reports/chapters_report",
+    "/admin/tm_reports/industry_report",
+    "/admin/tm_reports/chapter_leaders/export",
+    "/admin/tm_reports/chapters_report/export",
+    "/admin/tm_reports/industry_report/export",
+    "/admin/global_insights",
+    "/admin/export_chapter_insights",
+    "/admin/export_global_newsletter",
+    "/admin/export_chapter_leaders",
+    "/admin/export_facebook_customers");
+
+  // set any other admin pages you want to make available to moderators
+  // in $conf["tm_admin_moderator_whitelist"]
+  if (isset($conf["tm_admin_moderator_whitelist"])) {
+    $moderator_allowed_admin_pages = array_merge($moderator_allowed_admin_pages, $conf["tm_admin_moderator_whitelist"]);
+  }
+
+  // get current request path
+  // ie: /admin/branding
+  $request_path = "/" . strtolower(request_path());
+
+  // check if request path is for admin
+  if ((strpos($request_path, "/admin/") === 0) or ($request_path == "/admin")) {
+   
+    $perm_is_moderator = (in_array("moderator", $user->roles));
+    $perm_is_admin = (in_array("administrator", $user->roles));
+
+    // deny access to admin pages for all users except moderators or admins
+    if ((!$perm_is_moderator) && (!$perm_is_admin)) {
+      drupal_goto("/");
+    }
+
+    // allow moderators to access restricted admin pages
+    if (($perm_is_moderator) && !($perm_is_admin)) {
+
+      // restrict moderator admin pages
+      $res = array_search($request_path, $moderator_allowed_admin_pages);
+      if (array_search($request_path, $moderator_allowed_admin_pages) === false) {
+        drupal_goto("/");
+      }
+    }
+
+    // otherwise, user is admin
+  }
+
+  // don't display /node/add index
+  if ($request_path == "/node/add") {
+    if (($perm_is_moderator) && !($perm_is_admin)) {
+      drupal_goto("/");
+    }
+  }
+
+}
+
+/**
+ * Implement hook_file_insert()
+ * Remove troublesome characters from filenames
+ * Helpful for gmail images, CDNs, etc
+ * Todo: UTF8 handling?
+ */
+function tm_base_file_insert($file) {
+
+  global $conf;
+
+  // default characters
+  // can override with optional config variable $conf["tm_base_annoying_filename_chars"]
+  $change_filename_chars = array(" " => "_", "+" => "", "&" => "", "?" => "", "#" => "", "%" => "", "!" => "");
+  if (isset($conf["tm_base_change_filename_chars"])) {
+    $change_filename_chars = $conf["tm_base_change_filename_chars"];
+  }
+
+  $original_filename = $file->filename;
+  $new_filename = $file->filename;
+  $new_uri = $file->uri;
+
+  // check for and change annoying characters
+  foreach ($change_filename_chars as $char => $replace) {
+    $new_filename = str_replace($char, $replace, $new_filename);
+    $new_uri = str_replace($char, $replace, $new_uri);
+  }
+
+  // if filename changed, move the file and add to watchdog
+  if ($new_filename != $original_filename) {
+    $file->filename = $new_filename;
+    $file = file_move($file, $new_uri);
+    watchdog('file', t('%source has been renamed to %destination', array(
+      '%source' => $original_filename,
+      '%destination' => $file->filename,
+    )));
+  }
+}
+
+/**
+ * Preserve event and chapter images
+ * So announcement emails are not broken if image is changed after being sent
+ * Will result in watchdog messages 'The file %path was not deleted, because it does not exist.'
+ * Note: If using s3fs you need to apply 's3fs_preserve_chapter_event_images.patch'
+ * See: https://drupal.stackexchange.com/questions/2090/how-to-keep-underlying-file-when-deleting-a-filefield-value
+ */
+function tm_base_file_delete($file) {
+
+  global $conf;
+
+  // preserve event image files
+  if (preg_match('/\/images\/events\//', $file->uri)) {
+    $file->uri = $file->uri . '_DONOTDELETE';
+  }
+
+  // preserve chapter image files
+  if (preg_match('/\/images\/chapters\//', $file->uri)) {
+    $file->uri = $file->uri . '_DONOTDELETE';
+  }
+
+}
+
+/**
+ * Helper method
+ * Get list of regions
+ */
+function tm_base_get_all_regions() {
+
+  $regions = array(
+  "AF" => "Africa",
+  "AN" => "Antarctica",
+  "AS" => "Asia",
+  "EU" => "Europe",
+  "NA" => "North America",
+  "OC" => "Oceania",
+  "SA" => "South America");
+
+  return $regions;
+}
+
+/**
+ * Helper method
+ * Get list of countries names
+ * We refer to countries_country table
+ */
+function tm_base_get_all_country_names() {
+
+  $query = "SELECT iso2, name FROM countries_country";
+  $results = db_query($query)->fetchAll();
+
+  $countries = array();
+  foreach ($results as $result) {
+    $countries[$result->iso2] = $result->name;
+  }
+
+  return $countries;
+}
+
+/**
+ * Markdown any text
+ * Uses Parsedown.php library
+ * See: https://github.com/erusev/parsedown
+ */
+function tm_base_parsedown($value, $link_target = "_blank", $allow_html = false) {
+
+  $Parsedown = new Parsedown();
+  $Parsedown->setSafeMode(true);
+  $Parsedown->setAllowRawHtmlInSafeMode($allow_html);
+  if ($link_target != "") {
+    $Parsedown->setLinkTarget($link_target);
+  }
+  return $Parsedown->text($value);
+
+}
+
+/**
+ * Check if entity description can be rendered with markdown.
+ * 
+ * Configuration options:
+ * $conf["tm_markdown_allowed_users"] = array(1, 10452); // allowed users (use array(0) for all)
+ * $conf["tm_markdown_allowed_chapters"] = array(); // allowed chapter nids (use array(0) for all)
+ * $conf["tm_markdown_allowed_events"] = array(); // allowed events (use array(0) for all)
+ * $conf["tm_markdown_allowed_organizations"] = array(); // allowed companies (use array(0) for all)
+ */
+function tm_base_check_markdown_permission($entity_type, $entity_id) {
+
+  global $conf;
+
+  // config keys
+  $config_keys = array("user" => "tm_markdown_allowed_users", "chapter" => "tm_markdown_allowed_chapters", "event" => "tm_markdown_allowed_events", "organization" => "tm_markdown_allowed_organizations");
+
+  // check we have config
+  if (!isset($conf["tm_markdown_allowed_users"])) {
+    return false;
+  }
+
+  // check valid entity type
+  if (!isset($config_keys[$entity_type])) {
+    return false;
+  }
+
+  // get $conf[] key
+  $config_key = $config_keys[$entity_type];
+
+  // check config exists
+  if (!isset($conf[$config_key])) {
+    return false;
+  }
+
+  // all users or nodes, ie: array(0)
+  if (in_array(0, $conf[$config_key])) {
+    return true;
+  }
+
+  // check entity_id
+  if (in_array($entity_id, $conf[$config_key])) {
+    return true;
+  }
+
+  // check event chapter
+  if ($entity_type == "event") {
+    $event = node_load($entity_id);
+    if ($event != null) {
+      $chapter_id = _tm_event_get_chapter_id($event);
+      if ($chapter_id != null) {
+
+        // if any chapter
+        if (isset($conf["tm_markdown_allowed_chapters_events"][0])) {
+          if ($conf["tm_markdown_allowed_chapters_events"][0] == 0) {
+            return true;
+          }
+        }
+
+        // if chapter in allowed list
+        if (in_array($chapter_id, $conf["tm_markdown_allowed_chapters_events"])) {
+          return true;
+        }
+      }      
+    }
+  }
+
+  // no users, ie: array()
+  if (sizeof($conf[$config_key]) == 0) {
+    return false;
+  }
+
+
+  // no permission
+  return false;
+}
+
+/**
+ * Implement hook_pathauto_alias_alter()
+ * Replace strings when creating URL aliases
+ */
+function tm_base_pathauto_alias_alter(&$alias, array $context) {
+
+  global $conf;
+
+  // require $conf["tm_base_pathauto_filters"]
+  if (!isset($conf["tm_base_pathauto_filters"])) {
+    return;
+  }
+
+  // replace filtered items
+  $filtered_alias = $alias;
+  $filters = $conf["tm_base_pathauto_filters"];
+  foreach ($filters as $filter => $replace) {
+    $filtered_alias = str_replace($filter, $replace, $filtered_alias);
+  }
+
+  // check we still have a string
+  if (trim($filtered_alias) != "") {
+    $alias = $filtered_alias;
+  }
+
+}
+
+/**
+ * Filter out dashes and other characters from urls
+ * see: https://www.drupal.org/project/pathauto/issues/2319527 
+ */
+function tm_base_pathauto_punctuation_chars_alter(array &$punctuation) {
+
+  $punctuation['ndash'] = array(
+    'value' => '–',
+    'name' => t('En Dash'),
+  );
+  $punctuation['mdash'] = array(
+    'value' => '—',
+    'name' => t('Em Dash'),
+  );
+  $punctuation['single_quota_open'] = array(
+    'value' => '‘',
+    'name' => t('Quotation Open'),
+  );
+  $punctuation['single_quota_close'] = array(
+    'value' => '’',
+    'name' => t('Quotation Close'),
+  );
+  $punctuation['double_quota_open'] = array(
+    'value' => '“',
+    'name' => t('Double Quotation Open'),
+  );
+  $punctuation['double_quota_close'] = array(
+    'value' => '”',
+    'name' => t('Double Quotation Close'),
+  );
+
+}

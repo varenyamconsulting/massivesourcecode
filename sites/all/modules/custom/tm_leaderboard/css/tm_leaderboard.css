@@ -1,0 +1,115 @@
+#page-title { display: none; }
+#main { min-height: 800px; }
+.messages--help-tip { margin-left: 0.2rem !important; margin-right: 0.2rem; }
+
+#leaderboard {
+  width: 100%;
+  margin: auto;
+  margin-bottom: 2rem;
+}
+
+#leaderboard h1 { 
+  text-align: center;
+}
+
+#leaderboard table {
+	background-color: #fff;
+}
+
+#leaderboard table tr {
+	border-bottom: 1px solid #eee;
+}
+
+#leaderboard table th {
+	text-align: center;
+}
+
+#leaderboard table th.left {
+	text-align: left;
+}
+
+#leaderboard table td {
+	text-align: center;
+	padding-top: 4px;
+	padding-bottom: 4px;
+}
+
+#leaderboard table td.left {
+	text-align: left;
+}
+
+#leaderboard_links_chapter_leader {
+	text-align: center;
+	margin-top: 2rem;
+	margin-bottom: 2rem;
+}
+
+#leaderboard_links_chapter_leader .button {
+
+}
+
+#leaderboard_links {
+	text-align: center;
+}
+
+img.leaderboard_avatar {
+	width: 32px;
+	height: 32px;
+	border-radius: 16px;
+	vertical-align: middle;
+	margin-left: 0px;
+}
+
+.leaderboard_label {
+	font-size: 12px;
+	color: #888;
+	margin-left: 0.4rem;
+    padding-left: 0.4rem;
+    padding-right: 0.4rem;
+    font-weight: normal;
+    border-radius: 2px;
+    padding-top: 0.1rem;
+    padding-bottom: 0.1rem;
+    white-space: nowrap;
+    float: right;
+    margin-bottom: 0.2rem;
+}
+
+.leaderboard_label a {
+	color: #fff !important;
+}
+
+.leaderboard_label.blue {
+	color: #fff;
+	background-color: #007eb5;	
+}
+
+.leaderboard_label.green {
+	color: #fff;
+	background-color: #88ac00;
+}
+
+.leaderboard_label.red {
+	color: #fff;
+	background-color: #bd0053;
+}
+
+#leaderboard .subtitle {
+	text-align: center;
+	margin-top: -1rem;
+	margin-bottom: 2rem;
+}
+
+@media only screen and (max-width: 600px) {
+
+	.hide_narrow {
+		display: none;
+	}
+
+	#leaderboard .chapter_name {
+		width: 12rem;
+		display: inline-block;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+}

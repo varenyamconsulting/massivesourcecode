@@ -1,0 +1,212 @@
+<?php
+
+/**
+ * @file
+ * Install, update and uninstall functions for the tm_base module.
+ */
+
+/**
+ * Implements hook_install().
+ */
+function tm_base_install() {
+  _tm_base_segments_terms_import();
+  
+  // Assign the correct user admin role.
+  if ($admin_role = user_role_load_by_name('administrator')) {
+    variable_set('user_admin_role', $admin_role->rid);
+  }
+  
+  // Create and assign the non-validated role.
+  $non_validated_role = user_role_load_by_name('non-validated');
+  if (!$non_validated_role) {
+    $non_validated_role = new stdClass();
+    $non_validated_role->name = 'non-validated';
+    user_role_save($non_validated_role);
+  }
+  variable_set('logintoboggan_pre_auth_role', $non_validated_role->rid);
+  
+  /*
+  // Upload default images.
+  $imgs = array(
+    'cover-default.png' => drupal_get_path('module', 'tm_base') . '/import/default_images/',
+    'avatar-default.png' => drupal_get_path('module', 'tm_base') . '/import/default_images/',
+  );
+  
+  _tm_base_upload_default_images($imgs);
+  */
+}
+
+/**
+ * Imports the industry segments taxonomy vocabulary.
+ */
+function _tm_base_segments_terms_import() {
+  if (taxonomy_vocabulary_machine_name_load('tm_segments')) {
+    return;
+  }
+  
+  
+  require drupal_get_path('module', 'tm_base') . '/import/taxonomy/tm_segments_terms.php';
+  
+  // Create vocabulary.
+  $tm_segments = (object) array(
+    'name' => 'Industry segment',
+    'description' => 'A list with industry segments',
+    'machine_name' => 'tm_segments',
+  );
+  taxonomy_vocabulary_save($tm_segments);
+  
+  // Create terms.
+  foreach ($tm_segments_terms as $parent_name => $children) {
+    $parent_term = new stdClass();
+    $parent_term->name = $parent_name;
+    $parent_term->vid = $tm_segments->vid;
+    taxonomy_term_save($parent_term);
+
+    foreach ($children as $child_name) {
+      $child_term = new stdClass();
+      $child_term->name = $child_name;
+      $child_term->vid = $tm_segments->vid;
+      $child_term->parent = $parent_term->tid;
+      taxonomy_term_save($child_term);
+    }
+  }
+}
+
+/**
+ * Upload images to default_images directory.
+ */
+function _tm_base_upload_default_images($imgs) {
+  foreach ($imgs as $filename => $source_dir) {
+    $source = $source_dir . $filename;
+    
+    $file = new stdClass();
+    $file->filename = $filename;
+    $file->timestamp = REQUEST_TIME;
+    $file->uri = $source;
+    $file->filemime = file_get_mimetype($source);
+    $file->uid = 1;
+    $file->status = 1;
+    $file = file_copy($file, 'public://default_images', FILE_EXISTS_REPLACE);
+  }
+  
+}
+
+/**
+ * Enable the tm_fields module.
+ */
+function tm_base_update_7001() {
+  module_enable(array('tm_fields'));
+}
+/**
+ * Enable the tm_users module.
+ */
+function tm_base_update_7002() {
+  module_enable(array('tm_users'));
+}
+/**
+ * Enable the tm_chapters, tm_events, tm_organizations and tm_theme module.
+ */
+function tm_base_update_7003() {
+  module_enable(array('tm_chapters', 'tm_events', 'tm_organizations', 'tm_theme'));
+}
+/**
+ * Enable the variable and variable_admin modules.
+ */
+function tm_base_update_7004() {
+  module_enable(array('variable', 'variable_admin'));
+}
+/**
+ * Enable the field_validation, field_validation_ui and color_field.
+ */
+function tm_base_update_7005() {
+  module_enable(array('field_validation', 'field_validation_ui', 'color_field'));
+}
+/**
+ * Enable the menu_attributes module.
+ */
+function tm_base_update_7006() {
+  module_enable(array('menu_attributes'));
+}
+/**
+ * Enable the simpletest module.
+ */
+function tm_base_update_7007() {
+  module_enable(array('simpletest'));
+}
+/**
+ * Enable the logintoboggan module.
+ */
+function tm_base_update_7008() {
+  module_enable(array('logintoboggan'));
+}
+/**
+ * Enable the tm_users_external_signin and module_filter module.
+ */
+function tm_base_update_7009() {
+  module_enable(array('tm_users_external_signin', 'module_filter'));
+}
+/**
+ * Enable the field_group module.
+ */
+function tm_base_update_7010() {
+  module_enable(array('field_group'));
+}
+/**
+ * Enable the tm_flags module.
+ */
+function tm_base_update_7011() {
+  module_enable(array('tm_flags'));
+}
+/**
+ * Enable the taxonomy module.
+ */
+function tm_base_update_7012() {
+  module_enable(array('taxonomy'));
+}
+/**
+ * Imports the industry segments taxonomy vocabulary.
+ */
+function tm_base_update_7013() {
+  _tm_base_segments_terms_import();
+}
+/**
+ * Enable the Hierarchical Select + HS Taxonomy modules
+ * Enable the entityreference_prepopulate module.
+ * Enable the date_views module.
+ */
+function tm_base_update_7014() {
+  module_enable(array('entityreference_prepopulate', 'hierarchical_select', 'hs_taxonomy', 'date_views'));
+}
+/**
+ * Enable the nodeaccess_nodereference, nodeaccess_userreference modules
+ * Enable the realname module.
+ */
+function tm_base_update_7015() {
+  module_enable(array('nodeaccess_nodereference', 'nodeaccess_userreference','realname'));
+}
+/**
+ * Enable the date_popup
+ */
+function tm_base_update_7016() {
+  module_enable(array('date_popup'));
+}
+/**
+ * Enable the TM search, the core search and the DS search modules.
+ */
+function tm_base_update_7017() {
+  module_enable(array('tm_search', 'search', 'ds_search'));
+}
+
+/**
+ * Enable the queue_mail, ultimate_cron and tm_notifications modules.
+ */
+function tm_base_update_7018() {
+  module_enable(array('queue_mail', 'tm_notifications', 'tm_notifications_new_follower', 'tm_notifications_chapter', 'tm_notifications_upcoming_event', 'tm_notifications_newsletters', 'tm_notifications_approval', 'tm_notifications_events' , 'ultimate_cron'));
+}
+
+/**
+ * Enable the countries and tzfield modules.
+ */
+function tm_base_update_7019() {
+  module_enable(array('countries','tzfield'));
+}

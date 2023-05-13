@@ -1,0 +1,930 @@
+<?php
+/**
+ * @file
+ * Code for the TM Theme feature.
+ */
+
+include_once 'tm_theme.features.inc';
+include_once 'tm_theme.preload_images.inc';
+
+// Alter html head
+// Remove shortlink metatags to node/123
+// from: https://gist.github.com/Dreamseer/3865185
+function tm_theme_html_head_alter(&$head_elements) {
+  
+  global $conf;
+  global $user;
+
+  // remove unneeded shortlink url
+  $remove = array(
+    '/^drupal_add_html_head_link:shortlink:/',     // Shortlink
+  );
+  foreach ($remove as $item) {
+    foreach (preg_grep($item, array_keys($head_elements)) as $key) {
+      unset($head_elements[$key]);
+    }
+  }
+
+  // add noindex to /node or /user URLs
+  // all URLs we want indexed should be clean URLs
+  // note: unlikely to hit this as we redirect all these
+  $url_parts = explode('/', request_uri());
+  if (($url_parts[1] == 'node') or ($url_parts[1] == 'user')) {
+  	$head_elements['tm_theme_meta_robots'] = array(
+  		'#tag' => 'meta',
+  		'#type' => 'html_tag',
+  		'#attributes' => array(
+  		'name' => 'robots',
+  		'content' => 'noindex'
+  		)
+  	);
+  }
+
+  // remove any metatags that are overridden in $conf['tm_theme_custom_meta_tags'] 
+  $request_path = strtolower(request_path());
+  if (isset($conf['tm_theme_custom_meta_tags'][$request_path])) {
+    $custom_meta_tags = $conf['tm_theme_custom_meta_tags'][$request_path];
+
+    // duplicate og:title into dcterms.title and twitter:title
+    if (isset($custom_meta_tags['og:title'])) {
+      $custom_meta_tags['dcterms.title'] = $custom_meta_tags['og:title'];
+      $custom_meta_tags['twitter:title'] = $custom_meta_tags['og:title'];
+    }
+
+    // duplicate og:description into description and twitter:description
+    if (isset($custom_meta_tags['og:description'])) {
+      $custom_meta_tags['description'] = $custom_meta_tags['og:description'];
+      $custom_meta_tags['twitter:description'] = $custom_meta_tags['og:description'];
+    }
+
+    // duplicate og:image into twitter:image unless already set
+    if (isset($custom_meta_tags['og:image']) and !isset($custom_meta_tags['twitter:image'])) {
+      $custom_meta_tags['twitter:image'] = $custom_meta_tags['og:image'];
+    }
+
+    foreach ($head_elements as $key => $element) {
+      if (strpos($key, "metatag_") === 0) {
+        $key_without_metatag = str_replace("metatag_", "", $key);
+        $key_without_metatag = str_replace("_0", "", $key_without_metatag);
+        if (array_key_exists($key_without_metatag, $custom_meta_tags)) {
+          unset($head_elements[$key]);
+        }
+      }
+    }  
+  }
+
+  // fix css for administrator on edit page
+  if (in_array("administrator", $user->roles)) {
+    drupal_add_css ('.fieldset-legend { position: relative !important; }', 'inline');
+  }
+
+  // tm_branding methods
+
+  // if front page check for partner branding link
+  if (drupal_is_front_page()) {
+
+    // set site_branding_partner cookie
+    if (isset($_GET["partner"])) {
+      if (trim($_GET["partner"]) != "") {
+
+        // store partner
+        user_cookie_save(array('site_branding_partner'=>strtolower(trim($_GET["partner"]))));
+
+        // store timestamp
+        $now = new DateTime(null, new DateTimeZone('UTC'));
+        user_cookie_save(array('site_branding_partner_timestamp'=>$now->getTimestamp()));
+
+        // set partner code for subscriptions (user)
+        if (module_exists("tm_subscriptions_user")) {
+          tm_subscriptions_user_set_partner_cookie();
+        }
+
+        drupal_goto("/");
+      }
+    }
+  }
+
+  // set site_branding_referrer_domain cookie
+  // don't match own domain
+  if (isset($_SERVER["HTTP_REFERER"])) {
+    if ($_SERVER["HTTP_REFERER"] != "") {
+      try {
+        $referer_domain = parse_url($_SERVER['HTTP_REFERER'], PHP_URL_HOST);
+        if (strtolower($referer_domain) != strtolower($_SERVER['HTTP_HOST'])) {
+
+          // store domain
+          $referer_domain = str_replace("www.", "", $referer_domain); // remove www
+          user_cookie_save(array('site_branding_referer_domain'=>strtolower($referer_domain)));
+          
+          // store timestamp
+          $now = new DateTime(null, new DateTimeZone('UTC'));
+          user_cookie_save(array('site_branding_referer_domain_timestamp'=>$now->getTimestamp()));
+        }
+        
+      } catch (Exception $e) {
+        // continue
+      }
+    }
+  }
+
+}
+
+/**
+ * Add js and html meta tags
+ */
+function tm_theme_preprocess_html(&$variables, $hook) {
+
+  global $conf;
+
+  if (drupal_is_front_page()) {
+    tm_theme_add_meta_tags_front_page();
+  }
+
+  // add sidebar
+  $custom_sidebar_template = "";
+  if (isset($conf["tm_theme_custom_sidebar_template"])) {
+    $custom_sidebar_template = $conf["tm_theme_custom_sidebar_template"];
+    if ($custom_sidebar_template != "") {
+      drupal_add_js(drupal_get_path('theme', 'tm') . '/js/sidebar.js', array('group' => JS_THEME));
+    }
+  }
+
+  // add impromptu js for better alert box handling
+  // see: http://trentrichardson.com/Impromptu/
+  // https://github.com/trentrichardson/jQuery-Impromptu
+  drupal_add_js(drupal_get_path('theme', 'tm') . '/js/jquery-impromptu.js', array('group' => JS_THEME));
+  drupal_add_css(drupal_get_path('theme', 'tm') . '/css/jquery-impromptu.css', array('group' => CSS_THEME));
+
+  // impromptu pure css theme effects admin theme
+  // allow on /user for profile editing
+  $url_parts = explode('/', request_uri());
+  if (!path_is_admin(current_path()) or ($url_parts[1] == "user") or ($url_parts[1] == "node")) {
+    drupal_add_css(drupal_get_path('theme', 'tm') . '/css/jquery-impromptu.pure.css', array('group' => CSS_THEME));
+  }
+
+  // if not front page add sticky header
+  // also ignore node or user edit pages as account menu is obscured when using sticky header
+  if ((!drupal_is_front_page()) and ($custom_sidebar_template == "")) {
+    drupal_add_js(drupal_get_path('theme', 'tm') . '/js/jquery.sticky.js', array('group' => JS_THEME));
+  }
+
+  // add EU cookie consent
+  // https://silktide.com/tools/cookie-consent
+  if (isset($conf["tm_cookieconsent_enable"])) {
+    if ($conf["tm_cookieconsent_enable"] == true) {
+
+      $show_cookie_consent = true;
+
+      // If tm_cookieconsent_check_geoip_is_eu check geoip
+      if (isset($conf["tm_cookieconsent_check_geoip_is_eu"])) {
+        if ($conf["tm_cookieconsent_check_geoip_is_eu"]) {
+          $visitor_ip = tm_geoip_get_real_visitor_ip();
+          $geoip_info = tm_geoip_lookup($visitor_ip);
+
+          if ($geoip_info != null) {
+            if (isset($geoip_info["continent"]["code"])) {
+
+              // set cookie consent to false if not EU
+              if ($geoip_info["continent"]["code"] != "EU") {
+                $show_cookie_consent = false;
+              }
+            }
+          } // end if geoip_info not null
+        } // end if tm_cookieconsent_check_geoip_is_eu enabled
+      } // end if tm_cookieconsent_check_geoip_is_eu set
+      
+      if ($show_cookie_consent) {
+        $privacy_url = $conf["tm_cookieconsent_privacy_url"];
+        drupal_add_js(drupal_get_path('theme', 'tm') . '/js/cookieconsent.v2.min.js', array('group' => JS_THEME));
+        drupal_add_js('window.cookieconsent_options = {"message":"We use cookies to ensure you get the best experience on our website. ","dismiss":"Ok","learnMore":"Learn more","link":"' . $privacy_url . '","theme":"dark-top"};', 'inline');
+      }
+     
+    }
+  }
+
+  // Call helper method to protect pii data from being sent to GA
+  tm_theme_ga_protect_pii($head_elements);
+
+  // tm_nps - add rating js
+  if (user_is_logged_in()) {
+    drupal_add_js(drupal_get_path('module', 'tm_nps') . '/js/tm_nps.js');
+  }
+
+  // show rating popup if ?feedback
+  if (isset($_GET["feedback"])) {
+    if (!user_is_logged_in()) {
+      drupal_set_message($conf["tm_users_feedback_cta"] . "<a href='/user/login?destination=" . drupal_get_path_alias() . "%3Ffeedback'>Please log in to share feedback</a>.");
+      drupal_goto(drupal_get_path_alias());
+    } else {
+      $site_name = $conf["tm_site_name"];
+      if (strpos(drupal_get_path_alias(), "events/") === 0) {
+        $site_name = "this event";
+      }
+      drupal_add_js('jQuery(document).ready(function () { setTimeout(function() { jq_net_promoter_score("' . $site_name . '","' . drupal_get_path_alias() . '" );}, 500); });', 'inline');
+    }
+  }
+
+  // show AMP if ?amp
+  if (module_exists("tm_amp")) {
+
+    // only display on page views
+    if (isset($variables['page']['#type'])) {
+      if ($variables['page']['#type'] == 'page') {
+
+         if (isset($_GET["amp"])) {
+
+          // front page
+          if (drupal_is_front_page()) { 
+            tm_amp_display_front_page();
+          }
+
+          // node
+          if (arg(0) == 'node' && is_numeric(arg(1))) {
+            tm_amp_display_node(arg(1));
+          }
+
+          // user
+          if (arg(0) == 'user' && is_numeric(arg(1))) {
+            tm_amp_display_user(arg(1));
+          }
+
+        } else {
+          
+          if (drupal_is_front_page() 
+            or ((arg(0) == 'node' or arg(0) == 'user') && is_numeric(arg(1)))) {
+
+            // <link rel="amphtml" href="https://www.example.com/url/to/amp/document.html">
+            $request_uri = "";
+            if (!drupal_is_front_page()) {
+              $request_uri = drupal_get_path_alias(arg(0) . "/" . arg(1)); // ie: /user/123
+            }
+            $amp_url = $conf["tm_email_server_http"] . "://" . $_SERVER["HTTP_HOST"] . "/" . $request_uri . "?amp";
+            $meta = array(
+              '#tag' => 'link', 
+              '#attributes' => array(
+              'rel' => 'amphtml', 
+              'href' => $amp_url,
+              ),
+            );
+            drupal_add_html_head($meta, 'amphtml');
+
+          }
+        }
+
+      }
+    }
+  }
+
+  // Add custom meta tags
+  tm_theme_add_meta_tags_request_path();
+
+  // Add custom page title
+  // refer to $conf['tm_theme_custom_meta_tags']
+  $request_path = strtolower(request_path());
+  if (isset($conf['tm_theme_custom_meta_tags'][$request_path])) {
+    $meta_tags = $conf['tm_theme_custom_meta_tags'][$request_path];
+    if (isset($meta_tags['og:title'])) {
+      $variables['head_title'] = $meta_tags['og:title'] . ' | ' . variable_get('site_name');
+    }
+  }
+
+}
+
+/**
+ * Add meta tags for front page
+ */
+function tm_theme_add_meta_tags_front_page() {
+
+  global $conf;
+
+  // gererate canonical url
+  $canonical = url('/', array('absolute' => TRUE)) . "/";
+
+  // canonical url
+  $meta = array(
+    '#tag' => 'link', 
+    '#attributes' => array(
+      'rel' => 'canonical', 
+      'href' => $canonical,
+    ),
+  );
+  drupal_add_html_head($meta, 'canonical');
+
+  // og:url
+  $meta = array(
+    '#tag' => 'meta', 
+    '#attributes' => array(
+      'property' => 'og:url', 
+      'content' => $canonical,
+    ),
+  );
+  drupal_add_html_head($meta, 'og:url');
+
+  // og:title
+  if (isset($conf['tm_frontpage_meta_og_title'])) {
+    $meta = array(
+      '#tag' => 'meta', 
+      '#attributes' => array(
+        'property' => 'og:title', 
+        'content' => $conf['tm_frontpage_meta_og_title'],
+      ),
+    );
+    drupal_add_html_head($meta, 'og:title');
+  }
+
+  // og:image
+  if (isset($conf['tm_frontpage_meta_og_image'])) {
+    if ($conf['tm_frontpage_meta_og_image'] != "") {
+        $meta = array(
+        '#tag' => 'meta', 
+        '#attributes' => array(
+          'property' => 'og:image', 
+          'content' => $conf['tm_frontpage_meta_og_image'],
+        ),
+      );
+      drupal_add_html_head($meta, 'og:image');
+    }
+  }
+
+  // description
+  if (isset($conf['tm_frontpage_meta_description'])) {
+    $meta = array(
+      '#tag' => 'meta', 
+      '#attributes' => array(
+        'name' => 'description',
+        'property' => 'og:description',
+        'content' => $conf['tm_frontpage_meta_description'],
+      ),
+    );
+    drupal_add_html_head($meta, 'description');
+  }
+}
+
+/**
+ * Add meta tags for user
+ */
+function tm_theme_add_meta_tags_user($uid) {
+
+  global $conf;
+
+  // load user account
+  $account = user_load($uid);
+  if ($account == null) {
+    return;
+  }
+
+  // date published and edited
+  /* ie: 
+  <meta property="article:published_time" content="2014-12-09T20:46:24-08:00" />
+  <meta property="article:modified_time" content="2016-01-19T10:38:35-08:00" />
+  <meta property="og:updated_time" content="2016-01-19T10:38:35-08:00" />*/
+
+  $time_format = "Y-m-d\TH:i:s-00:00";
+  $published_dt = new Datetime(null, new DateTimeZone('UTC'));
+  $published_dt->setTimestamp($account->created);
+  $published_time = $published_dt->format($time_format); //"2016-01-19T10:38:35-08:00";
+
+  // article:published_time
+  $meta = array(
+    '#tag' => 'meta', 
+    '#attributes' => array(
+      'property' => 'article:published_time', 
+      'content' => $published_time,
+    ),
+  );
+  drupal_add_html_head($meta, 'article:published_time');
+
+  // check last update time
+  $last_update = tm_users_get_update_timestamp($uid);
+  if ($last_update == null) {
+    return; // no last update to display
+  }
+
+  $updated_dt = new Datetime(null, new DateTimeZone('UTC'));
+  $updated_dt->setTimestamp($last_update);
+  $updated_time = $updated_dt->format($time_format); //"2016-01-19T10:38:35-08:00";
+
+  // article:modified_time
+  $meta = array(
+    '#tag' => 'meta', 
+    '#attributes' => array(
+      'property' => 'article:modified_time', 
+      'content' => $updated_time,
+    ),
+  );
+  drupal_add_html_head($meta, 'article:modified_time');
+
+  // og:updated_time
+  $meta = array(
+    '#tag' => 'meta', 
+    '#attributes' => array(
+      'property' => 'og:updated_time', 
+      'content' => $updated_time,
+    ),
+  );
+  drupal_add_html_head($meta, 'og:updated_time');
+
+}
+
+/**
+ * Add meta tags for node
+ */
+function tm_theme_add_meta_tags_node($nid) {
+
+  global $conf;
+
+  // load node
+  $node = node_load($nid);
+  if ($node == null) {
+    return;
+  }
+
+  // only support organization, chapter and events
+  if (!in_array($node->type, array("organization", "chapter", "event"))) {
+    return;
+  }
+
+  // date edited
+  /* ie: 
+  <meta property="article:modified_time" content="2016-01-19T10:38:35-08:00" />
+  <meta property="og:updated_time" content="2016-01-19T10:38:35-08:00" />*/
+
+  // check last update time from status update
+  $last_update = null;
+  if (module_exists("tm_status_updates")) {
+    $last_update = tm_status_updates_get_last_update_timestamp($node->type, $node->nid);
+  }
+
+  // get when node was last changed
+  $last_changed = $node->changed;
+
+  // get most recent update between status update and last changed
+  $most_recent = max(array($last_update, $last_changed));
+   
+  $time_format = "Y-m-d\TH:i:s-00:00";
+
+  // published
+  $published_dt = new Datetime(null, new DateTimeZone('UTC'));
+  $published_dt->setTimestamp($node->created);
+  $published_time = $published_dt->format($time_format); //"2016-01-19T10:38:35-08:00";
+
+  // modified
+  $updated_dt = new Datetime(null, new DateTimeZone('UTC'));
+  $updated_dt->setTimestamp($most_recent);
+  $updated_time = $updated_dt->format($time_format); //"2016-01-19T10:38:35-08:00";
+
+
+  // article:published_time
+  /*$meta = array(
+    '#tag' => 'meta', 
+    '#attributes' => array(
+      'property' => 'article:published_time', 
+      'content' => $published_time,
+    ),
+  );
+  drupal_add_html_head($meta, 'article:published_time');*/
+
+  // article:modified_time
+  $meta = array(
+    '#tag' => 'meta', 
+    '#attributes' => array(
+      'property' => 'article:modified_time', 
+      'content' => $updated_time,
+    ),
+  );
+  drupal_add_html_head($meta, 'article:modified_time', true);
+
+  // og:updated_time
+  $meta = array(
+    '#tag' => 'meta', 
+    '#attributes' => array(
+      'property' => 'og:updated_time', 
+      'content' => $updated_time,
+    ),
+  );
+  drupal_add_html_head($meta, 'og:updated_time');
+
+}
+
+/**
+ * Add meta tags for custom path
+ */
+function tm_theme_add_meta_tags_request_path() {
+
+  global $conf;
+
+  // refer to $conf['tm_theme_custom_meta_tags']
+  // example for /community path
+  // $conf['tm_theme_custom_meta_tags']['community'] = array(
+  //  'og:title' => 'Community Page',
+  //  'og:description' => 'Explore our community',
+  //  'og:image' => '');
+  //
+  $request_path = strtolower(request_path());
+  if (!isset($conf['tm_theme_custom_meta_tags'][$request_path])) {
+    return;
+  }
+
+  // get meta tags
+  $meta_tags = $conf['tm_theme_custom_meta_tags'][$request_path];
+
+  // duplicate og:title into dcterms.title and twitter:title
+  if (isset($meta_tags['og:title'])) {
+    $meta_tags['dcterms.title'] = $meta_tags['og:title'];
+    $meta_tags['twitter:title'] = $meta_tags['og:title'];
+  }
+
+  // duplicate og:description into description and twitter:description
+  if (isset($meta_tags['og:description'])) {
+    $meta_tags['description'] = $meta_tags['og:description'];
+    $meta_tags['twitter:description'] = $meta_tags['og:description'];
+  }
+
+  // duplicate og:image into twitter:image unless already set
+  if (isset($meta_tags['og:image']) and !isset($meta_tags['twitter:image'])) {
+    $meta_tags['twitter:image'] = $meta_tags['og:image'];
+  }
+
+  // add tags
+  foreach ($meta_tags as $tag => $value) {
+    $meta = array(
+      '#tag' => 'meta', 
+      '#attributes' => array(
+        'property' => $tag, 
+        'content' => $value,
+      ),
+    );
+
+    // description tag has name attribute
+    if ($tag == 'description') {
+      unset($meta['#attributes']);
+      $meta['#attributes'] = array();
+      $meta['#attributes']['name'] = 'description';
+      $meta['#attributes']['content'] = $value;
+    }
+
+    // dcterms. , twitter: has name attribute
+    if ((strpos($tag, "dcterms.") === 0) or (strpos($tag, "twitter:") === 0)) {
+      unset($meta['#attributes']);
+      $meta['#attributes'] = array();
+      $meta['#attributes']['name'] = $tag;
+      $meta['#attributes']['content'] = $value;
+    }
+
+    // add custom metatag
+    drupal_add_html_head($meta, $tag);
+
+  }
+
+}
+
+/**
+ * Add cover video to user profile
+ * Add meta tags to user profile
+ */
+function tm_theme_user_view($account, $view_mode, $langcode) {
+
+  global $conf;
+
+  // Check full view mode
+  if ($view_mode != "full") {
+    return;
+  }
+
+  // check we are viewing user account
+  if (!(arg(0) == 'user' and is_numeric(arg(1)) and arg(2) == FALSE)) {
+    return;
+  }
+
+  // Check cover videos enabled
+  if ($conf["tm_cover_videos_enabled"]) {
+    tm_theme_add_cover_video_js($account, null);
+  }
+
+  // Add additional user meta tags
+  tm_theme_add_meta_tags_user(arg(1));
+
+  // Protect pii data if using google analytics
+  tm_theme_ga_protect_pii_user($account);
+
+}
+
+/**
+ * Add cover video to node profile
+ */
+function tm_theme_node_view($node, $view_mode, $langcode) {
+
+  global $conf;
+
+  // Check full view mode
+  if ($view_mode != "full") {
+    return;
+  }
+
+  // check we are viewing node
+  if (!(arg(0) == 'node' and is_numeric(arg(1)) and arg(2) == FALSE)) {
+    return;
+  }
+
+  // add video cover
+  if ($conf["tm_cover_videos_enabled"]) {
+    tm_theme_add_cover_video_js(null, $node);
+  }
+
+  // Add additional node meta tags
+  tm_theme_add_meta_tags_node(arg(1));
+
+}
+
+/**
+ * Check for valid cover video url and apply js
+ */
+function tm_theme_add_cover_video_js($account, $node) {
+
+  // check if user has cover video
+  $cover_video_id = null;
+  $cover_video_value = null;
+
+  // account
+  if ($account != null) {
+    if (isset($account->field_user_cover_video[LANGUAGE_NONE][0]['value'])) {
+      $cover_video_value = $account->field_user_cover_video[LANGUAGE_NONE][0]['value'];
+    }
+  }
+  
+  // node (event, chapter, company)
+  if ($node != null) {
+    if ($node->type == "chapter") {
+      if (isset($node->field_chapter_cover_video[LANGUAGE_NONE][0]['value'])) {
+        $cover_video_value = $node->field_chapter_cover_video[LANGUAGE_NONE][0]['value'];
+      }
+    }
+
+    if ($node->type == "organization") {
+      if (isset($node->field_company_cover_video[LANGUAGE_NONE][0]['value'])) {
+        $cover_video_value = $node->field_company_cover_video[LANGUAGE_NONE][0]['value'];
+      }
+    }
+
+    if ($node->type == "event") {
+
+      global $user;
+      $account = user_load($user->uid);
+
+      if (isset($node->field_event_cover_video[LANGUAGE_NONE][0]['value'])) {
+        $cover_video_value = $node->field_event_cover_video[LANGUAGE_NONE][0]['value'];
+      } else {
+       
+        // use live stream url if available
+        // check if we can display it (don't check if livestream is on in last argument)
+        if (tm_event_livestream_check_display($account, $node, true, false)) {
+          $livestream_url = tm_event_get_livestream_url($node);
+          if (trim($livestream_url) != "") {
+
+            // show the live stream in the cover video
+            $cover_video_value = $livestream_url;
+
+             // hide the chapter sticker so it doesn't obscure the video
+            drupal_add_css(".extra .chapter-sticker { display: none !important; }", "inline");
+          }
+        }
+      }
+
+      // if showing live stream video, turn off cover video
+      if (tm_event_livestream_check_display($account, $node)) {
+        $cover_video_value = null;
+      }
+
+    }
+  }
+  
+  // validate video url
+  if ($cover_video_value != null) {
+    
+    // match youtube url
+    // http://stackoverflow.com/questions/3392993/php-regex-to-get-youtube-video-id
+    preg_match("/^(?:http(?:s)?:\/\/)?(?:www\.)?(?:m\.)?(?:youtu\.be\/|youtube\.com\/(?:(?:watch)?\?(?:.*&)?v(?:i)?=|(?:embed|v|vi|user)\/))([^\?&\"'>]+)/", $cover_video_value, $matches);
+
+    if (sizeof($matches) != 0 ) {
+      $cover_video_id = $matches[1];
+    } else {
+      // check if its just id
+      if ((strlen($cover_video_value < 20) && (strpos($cover_video_value, ".") === false))) {
+        $cover_video_id = $cover_video_value;
+      }
+    }
+  }
+
+  // testing
+  // $cover_video_id = "jhFDyDgMVUI"; // "rbtv2zxhufM"
+
+  // add js if user has a cover video
+  if ($cover_video_id != null) {
+
+    // add cover video to play
+    drupal_add_js(array('tm_theme' => array('cover_video_id' => $cover_video_id)), array('type' => 'setting'));
+
+    // add edit photos script to page
+    drupal_add_js(drupal_get_path('module', 'tm_theme') . '/js/tm_theme_cover_video.js');
+
+  }
+
+}
+
+/**
+ * Implement hook_theme_ds_pre_render_alter(&$layout_render_array, $context);
+ * Optimize performance of rendering grid views on pages.
+ * Remove field_image from grid view if not viewing a one column grid
+ */
+function tm_theme_ds_pre_render_alter(&$layout_render_array, $context) {
+
+  // if current page is a node or user
+  if (((arg(0) == 'node') or (arg(0) == 'user')) && (is_numeric(arg(1))) && (arg(2) == null)) {
+   
+    // if rendering a grid
+    if ($context['view_mode'] == 'grid') {
+
+      // remove field_image (since it wont be displayed)
+      foreach($layout_render_array['media'] as $key => $value) {
+        if (isset($layout_render_array['media'][$key]['#field_name'])) {
+          if ($layout_render_array['media'][$key]['#field_name'] == 'field_image') {
+            unset($layout_render_array['media'][$key]);
+          }
+        }
+      }
+    }
+  }
+  
+}
+
+/**
+ * Implement hook_preprocess_page
+ * Insert node and user variables into templates
+ */
+function tm_theme_preprocess_page(&$variables) {
+
+  // add user_id for tm_subscriptions_user for use in page--user.tpl.php
+  if (arg(0) == "node") {
+    $variables['tm_theme_node_id'] = arg(1);
+  }
+
+  // add user_id for tm_subscriptions_user for use in page--user.tpl.php
+  if (arg(0) == "user") {
+    $variables['tm_theme_user_id'] = arg(1);
+  }
+
+  // don't display taxonomy pages
+  if (arg(0) == 'taxonomy' && arg(1) == 'term' && is_numeric(arg(2))) {
+    global $user;
+    if (!in_array("administrator", $user->roles)) {
+      drupal_goto("/");
+    }
+  }
+  
+}
+
+/**
+ * Helper method to protect pii data from being sent to GA
+ * Use with google_analytics module - set in 'Code snippet (before)':
+
+ if (typeof(tm_ga) != "undefined") {
+   if (typeof(tm_ga.set_location) != "undefined") {
+    ga('set', 'location', tm_ga.set_location);
+   }
+   if (typeof(tm_ga.set_title) != "undefined") {
+    ga('set', 'title', tm_ga.set_title);
+   }
+ }
+ 
+if (typeof(tm_ga_user) != "undefined") {
+   if (typeof(tm_ga_user.set_location) != "undefined") {
+    ga('set', 'location', tm_ga_user.set_location);
+   }
+   if (typeof(tm_ga_user.set_title) != "undefined") {
+    ga('set', 'title', tm_ga_user.set_title);
+   }
+}
+ */
+function tm_theme_ga_protect_pii(&$head_elements) {
+
+  global $base_url;
+  $ga_settings = array();
+
+  // remove all query parameters
+  $ga_settings["set_location"] = $base_url . "/" . request_path() . tm_theme_ga_protect_pii_allowed_query_string();
+
+  // set in js before google_analytics
+  drupal_add_js("var tm_ga = " . json_encode($ga_settings) . ";", array(
+  'type' => 'inline',
+  'scope' => 'header',
+  'group' => JS_LIBRARY * 2, // same group as google_tag
+  'weight' => -10));
+}
+
+/**
+ * Helper method to protect pii data from being sent to GA
+ */
+function tm_theme_ga_protect_pii_user($account) {
+
+  global $base_url;
+  $ga_settings = array();
+  $ga_settings["set_location"] = $base_url . "/user/" . $account->uid . tm_theme_ga_protect_pii_allowed_query_string();
+  $ga_settings["set_title"] = 'User Profile Page ' . $account->uid;
+
+  // set in js before google_analytics
+  drupal_add_js("var tm_ga_user = " . json_encode($ga_settings) . ";", array(
+  'type' => 'inline',
+  'scope' => 'header',
+  'group' => JS_LIBRARY * 2, // same group as google_tag
+  'weight' => -10));
+}
+
+/**
+ * Helper method to add any allowed paramaters to query url
+ */
+function tm_theme_ga_protect_pii_allowed_query_string() {
+
+  global $conf;
+
+  try {
+
+    // default allowed params
+    $allowed_params = array("utm_campaign", "utm_source", "utm_medium", "utm_term", "utm_content");
+    if (isset($conf["tm_google_analytics_allowed_params"])) {
+      $allowed_params = $conf["tm_google_analytics_allowed_params"];
+    }
+
+    $add_params = array();
+    $query_params = drupal_get_query_parameters();
+    foreach($allowed_params as $param) {
+      if (isset($query_params[$param])) {
+        $add_params[$param] = tm_theme_ga_protect_pii_strip_email($query_params[$param]);
+      }
+    }
+
+    $query_strings = array();
+    if (sizeof($add_params) > 0) {
+      foreach ($add_params as $add_param => $value) {
+        $query_strings[] = $add_param . "=" . strip_tags($value);
+      }
+      return "?" . implode("&", $query_strings);
+    }
+
+  } catch (Exception $e) {
+    return "";
+  }
+  
+  // no parameters
+  return "";
+
+}
+
+/**
+ * Helper method to redact any email addresses
+ */
+function tm_theme_ga_protect_pii_strip_email($str) {
+
+  // strip any string with @
+  if ((strpos($str, "@")) !== false) {
+    return "";
+  }
+  return $str;
+}
+
+/**
+ * Put all scripts in footer, unless they are inline or in list
+ * See html.tpl.php for location where scripts are rendered
+ * See http://pixel-whip.com/drupal-load-scripts-last.html
+ */
+function tm_theme_js_alter(&$javascript) {
+
+  global $conf;
+
+  // Collect the scripts we want in to remain in the header scope
+  $header_scripts = array();
+  if (isset($conf["tm_theme_js_header_scripts"])) {
+    $header_scripts = $conf["tm_theme_js_header_scripts"];
+  }
+
+  // Array of script that will always go after the footer scripts
+  $footer_scripts = array();
+  if (isset($conf["tm_theme_js_footer_scripts"])) {
+    $footer_scripts = $conf["tm_theme_js_footer_scripts"];
+  }
+ 
+  foreach ($javascript as $key => &$script) {
+
+    // Change the default scope of all other scripts to footer.
+    // We assume if the script is scoped to header it was done so by default.
+    if (($script['type'] != 'inline') and ($script['scope'] == 'header') and (!in_array($script['data'], $header_scripts))) {
+      $script['scope'] = 'footer';
+    }
+
+    // Move certain scripts to after footer
+    if (in_array($script['data'], $footer_scripts)) {
+      $script['scope'] = 'tm_after_footer';
+    }
+
+  }
+
+}

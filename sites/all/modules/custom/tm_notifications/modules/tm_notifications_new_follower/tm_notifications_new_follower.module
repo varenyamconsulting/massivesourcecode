@@ -1,0 +1,256 @@
+<?php
+/**
+ * @file
+ * Code for the TM Notifications Following feature.
+ */
+
+include_once 'tm_notifications_new_follower.features.inc';
+
+/**
+ * Implements hook_tm_notif_info()
+ */
+function tm_notifications_new_follower_tm_notif_info() {
+  $notification = array();
+
+  $notification['new_follower'] = array(
+    'title' => 'New Follower',
+    'description' => 'Notify when someone follows me',
+    'use_cron' => FALSE,
+    'tokens' => array(
+      // The token types that have specific context. Can be multiple token types like 'term' and/or 'user'
+      'token_types' => array('user', 'current-user', 'node'),
+      // A boolean TRUE or FALSE whether to include 'global' context tokens like [current-user:*] or [site:*]. Defaults to TRUE.
+      'global_types' => FALSE,
+      // A boolean whether to include the 'Click this token to insert in into the the focused textfield' JavaScript functionality. Defaults to TRUE.
+      'click_insert' => TRUE
+    )
+  );
+
+  $notification['new_organization_follower'] = array(
+    'title' => 'New Organization Follower',
+    'description' => 'Notify when someone follows my company page',
+    'use_cron' => FALSE,
+    'tokens' => array(
+      // The token types that have specific context. Can be multiple token types like 'term' and/or 'user'
+      'token_types' => array('user', 'current-user', 'node'),
+      // A boolean TRUE or FALSE whether to include 'global' context tokens like [current-user:*] or [site:*]. Defaults to TRUE.
+      'global_types' => FALSE,
+      // A boolean whether to include the 'Click this token to insert in into the the focused textfield' JavaScript functionality. Defaults to TRUE.
+      'click_insert' => TRUE
+    )
+  );
+
+  return $notification;
+}
+
+/**
+ * Implement hook_flag_flag()
+ */
+function tm_notifications_new_follower_flag_flag($flag, $entity_id, $account, $flagging) {
+  
+  global $conf;
+
+  // You have a new follower
+  if ($flag->name == 'follow_members' && $flag->entity_type == 'user') {
+
+    $followed_user = user_load($entity_id);
+    $who_followed = user_load($account->uid);
+
+    // Check and set follow_members_log
+    // If previously followed by this member, don't send another notification
+    $flag_log = flag_get_flag('follow_members_log', NULL);
+    $previously_followed_by_user = ($flag_log->is_flagged($followed_user->uid, $who_followed->uid));
+    if ($previously_followed_by_user) {
+      return;
+    }
+    $flag_log->flag('flag', $followed_user->uid, $who_followed, TRUE);
+    
+    // set profile url (either friendly url or community url)
+    $profile_url = drupal_get_path_alias("user/" . $who_followed->uid);
+    $profile_uid = $who_followed->uid;
+
+    // workaround: if we are following automatically via tm_inivitations, then
+    // drupal_get_path_alias will return 'user/uid' for the newly created user. 
+    // So in this case we look for this and change it to a community/username url.
+    if (strpos($profile_url, "user/") === 0) {
+      $profile_url = "community/" . strtolower($who_followed->name);
+    }
+
+    // notify the user that they have a new follower
+
+    // get user first name and last name
+    // we can't always rely on current-user token as user can follow on signup via tm_invitations
+    $first_name = strip_tags($who_followed->field_user_first_name['und'][0]['value']);
+    $last_name = strip_tags($who_followed->field_user_last_name['und'][0]['value']);
+
+    // Get follower message from tm_users_follow_message via drupal_static
+    // Note: this variable should have already been sanitised
+    $follower_message = drupal_static("tm_notifications_new_follower_user_message");
+    drupal_static_reset("tm_notifications_new_follower_user_message");
+    if ($follower_message != "") {
+      $follower_message = "<strong>Message from " . strip_tags($first_name) . ":</strong> " . $follower_message . "<br><br>";
+    }
+
+    $messaging_instructions = "";
+    $reply_to = "";
+    if ($conf["tm_messaging_enabled"]) {
+
+      // check following
+      $flag = flag_get_flag('follow_members');
+      $you_are_following_them = ($flag->is_flagged($who_followed->uid, $followed_user->uid));
+
+      // get notificaton setting
+      $notification = new TMNotification("member_message");
+
+      // keep track of if we are allow reply-to to be another member
+      $reply_to_member = false;
+
+      // check if we are following them already
+      $hero_text = "You've got a new follower.";
+      if ($you_are_following_them) {
+
+        // connection
+        $hero_text = "You've made a connection.";
+
+        // check if we can send messages
+        if (tm_messaging_check_send_message($followed_user->uid, $who_followed->uid, true, false)) {
+
+          // Allow reply via email if follower sent a message and we are now connected
+          if ($follower_message != "") {
+
+            // Reply address
+            $reply_to = $first_name . " " . $last_name . " <" . $who_followed->mail . ">";
+
+            // From address
+            // ie: John Travels <communication@yourcommunity.com>
+            $from = $first_name . " " . $last_name . "<" . $conf["tm_messaging_from_email"] . ">";
+
+            $messaging_instructions = "<strong>You can respond to " . $first_name . " by replying directly to this email.</strong><br><br>";
+            $reply_to_member = true;
+
+          } else {
+
+            // No message in this follow
+            $messaging_instructions = "You can send " . $first_name . " a message by visiting their profile.<br><br>";
+
+          }
+        }
+      } else {
+        // not already following
+        // check person who followed has notification setting enabled
+        if ($notification->isEnabled($who_followed->uid)) {
+          if ($follower_message != "") {
+            $messaging_instructions = "<strong>To reply to " . $first_name . ", follow them back to send a message.</strong><br><br>";
+          } else {
+            $messaging_instructions = "You can send " . $first_name . " a message if you follow them back.<br><br>";
+          }
+        }
+      }
+    }
+
+    // hero headline
+    $hero_headline = tm_notifications_render_hero_headline_html($hero_text);
+
+    // generate member html
+    $member_widget = tm_notifications_render_member_html($who_followed);
+
+    // if tm_match enabled
+    $static_tm_match_swiped_right = &drupal_static("tm_match_swiped_right");
+
+    // action text
+    $action_text = "followed you";
+    if ($static_tm_match_swiped_right) {
+      $action_text = "matched you";
+      if ($you_are_following_them) {
+         $action_text = "matched with you";
+      }
+      $messaging_instructions .= $conf["tm_match_follower_notification_message"];
+    }
+
+    // Notification options
+    $notification_options = array('user' => $followed_user, '__PROFILE_URL__' => $profile_url, '__PROFILE_UID__' => $profile_uid, '__USER_FIRST_NAME__' => $first_name, '__USER_LAST_NAME__' => $last_name, '__MESSAGING_INSTRUCTIONS__' => $messaging_instructions, '__FOLLOWER_MESSAGE__' => $follower_message, '__ACTION__' => $action_text, 'reply_to_member' => $reply_to_member, '__HERO_HEADLINE__' => $hero_headline, '__MEMBER_WIDGET__' => $member_widget);
+
+    // If reply_to is set
+    if ($reply_to != "") {
+      $notification_options["__REPLY_TO__"] = $reply_to;
+      tm_notifications_notify('new_follower', $followed_user, $notification_options, $from);
+    } else {
+      tm_notifications_notify('new_follower', $followed_user, $notification_options);
+    }
+    
+
+  }
+
+  // Your organization has a new follower
+  if ($flag->name == 'follow_organizations' && $flag->entity_type == 'node') {
+
+    $followed_organization = node_load($entity_id);
+    $who_followed = user_load($account->uid);
+
+    // action
+    $display_upvotes = $conf["tm_organizations_upvote"];
+    $action_text = "followed";
+    $headline_text = "You've got a new follower.";
+    if ($display_upvotes) {
+      $action_text = "upvoted";
+      $headline_text = "You received an upvote.";
+    }
+
+    // Check and set follow_organizations_log
+    // If previously followed by this organization, don't send another notification
+    $flag_log = flag_get_flag('follow_organizations_log', NULL);
+    $previously_followed_by_user = ($flag_log->is_flagged($followed_organization->nid, $who_followed->uid));
+    if ($previously_followed_by_user) {
+      return;
+    }
+    $flag_log->flag('flag', $followed_organization->nid, $who_followed, TRUE);
+
+    // get user first name and last name
+    // we can't always rely on current-user token as user can follow on signup via tm_invitations
+    $first_name = strip_tags($who_followed->field_user_first_name['und'][0]['value']);
+    $last_name = strip_tags($who_followed->field_user_last_name['und'][0]['value']);
+
+    // Get follower message from tm_users_follow_message via drupal_static
+    // Note: this variable should have already been sanitised
+    $follower_message = drupal_static("tm_notifications_new_follower_organization_message");
+    drupal_static_reset("tm_notifications_new_follower_organization_message");
+    if ($follower_message != "") {
+      $follower_message = "<strong>Message from " . strip_tags($first_name) . ":</strong> " . $follower_message . "<br><br>";
+    }
+
+     // hero headline
+    $hero_headline = tm_notifications_render_hero_headline_html($headline_text);
+
+    // generate member html
+    $member_widget = tm_notifications_render_member_html($who_followed);
+
+    // num upvotes or followers
+    $num_followers = tm_organizations_get_num_followers($followed_organization->nid);
+
+    // how many upvotes or followers
+    if ($display_upvotes) {
+      $follower_count_message = "You've received " . number_format($num_followers) . " upvotes so far &mdash; keep it up 🎉";
+      if ($num_followers == 1) {
+        $follower_count_message = "Congrats &mdash; this is your first upvote from the community 🎉";
+      }
+    } else {
+      $follower_count_message = "You've now got " . number_format($num_followers) . " followers.";
+      if ($num_followers == 1) {
+        $follower_count_message = "Congrats &mdash; this is your first follower from the community 🎉";
+      }
+    }
+
+    // notify each owner of the organizational profile that they have a new follower
+    foreach ($followed_organization->field_owner['und'] as $owner) {
+      $organizational_owner = user_load($owner['target_id']);
+
+      // set profile url (either friendly url or community url)
+      $profile_url = drupal_get_path_alias("user/" . $who_followed->uid);
+      $profile_uid = $who_followed->uid;
+
+      // notify the user that they have a new follower
+      tm_notifications_notify('new_organization_follower', $organizational_owner, array('user' => $organizational_owner, 'node' => $followed_organization, '__PROFILE_URL__' => $profile_url, '__PROFILE_UID__' => $profile_uid, '__FOLLOWER_MESSAGE__' => $follower_message, '__USER_FIRST_NAME__' => $first_name, '__USER_LAST_NAME__' => $last_name, '__ACTION__' => $action_text, '__PROFILE_NID__' => $followed_organization->nid, '__HERO_HEADLINE__' => $hero_headline, '__MEMBER_WIDGET__' => $member_widget, '__FOLLOWER_COUNT_MESSAGE__' => $follower_count_message));
+    }
+
+  }
+}

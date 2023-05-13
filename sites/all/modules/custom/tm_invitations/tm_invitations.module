@@ -1,0 +1,622 @@
+<?php
+/**
+ * @file
+ * Code for the TM Invitations feature.
+ */
+
+include_once 'tm_invitations.features.inc';
+
+/*
+ * Implements hook permission
+ */
+function tm_invitations_permission() {
+  return array(
+    'tm invite users' => array(
+      'title' => t('Invite users'),
+      'description' => t('Access to invite users page.'),
+    ),
+    'tm invite unlimited' => array(
+      'title' => t('Allow invite unlimited users'),
+      'description' => t('In other case, the limit is 10 email per page request.'),
+    ),
+    'tm invite own chapters' => array(
+      'title' => t('Allow invite users to own chapters'),
+      'description' => t('Access to own chapters/%/invite page.'),
+    ),
+    'tm invite all chapters' => array(
+      'title' => t('Allow invite users to all chapters'),
+      'description' => t('Access to all chapters/%/invite pages.'),
+    ),
+  );
+}
+
+/*
+ * Implements hook menu
+ */
+function tm_invitations_menu() {
+  $items['invite'] = array(
+    'title' => 'Invite Members',
+    'title callback' => 't',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('tm_invitations_invite_form'),
+    'access arguments' => array('tm invite users'),
+    'class' => 'invite-header',
+    'type' => MENU_CALLBACK,
+  );
+  $items['chapters/%/invitations'] = array(
+    'title' => 'Grow your Chapter',
+    'title callback' => 't',
+    'page callback' => 'chapter_invitations_page',
+    'page arguments' => array('tm_invitations_invite_form'),
+    'access callback' => 'chapter_invitations_page_check_permissions',
+    'class' => 'invite-header',
+    'type' => MENU_CALLBACK,
+  );
+ 
+  return $items;
+}
+
+/**
+ * Check permission to view chapter insights
+ */
+function chapter_invitations_page_check_permissions() {
+
+  global $user;
+  global $conf;
+  $nid = _orig_nid();
+
+  if($nid == 0) {
+    return false;
+  }
+
+  // check if:
+  // - chapter leader, or community manager
+  // - moderator, or
+  // - administrator
+  return (tm_users_is_chapter_leader($user->uid, $nid) or (in_array("moderator", $user->roles)) or (in_array("administrator", $user->roles)));
+
+}
+
+/* 
+ * Chapters invitations page
+ */
+function chapter_invitations_page() {
+
+  global $user;
+  global $conf;
+  $nid = _orig_nid();
+
+  if($nid == 0) {
+    print drupal_not_found();
+    return;
+  }
+
+  $chapter = node_load($nid);
+  $chapter_name = $chapter->title;
+
+  $form = drupal_get_form('tm_invitations_invite_form');
+
+  $output = l(t('Back to chapter page'), url('node/'.$nid, array('absolute' => TRUE)));
+
+  $output .=  t('<p style="font-size: 11pt;">Grow your chapter by inviting new members to your chapter with email invitations. Just use the form below to bulk add your invitation emails.</p>
+    <p style="font-size: 11pt;"><strong>How it works</strong>
+      <br>1. Members will be sent an invitation email to join your chapter (<i>subject: Your Invitation to ' . $conf['tm_site_name'] . " " . $chapter_name . '</i>)
+      <br>2. If they sign up using the email address you invited them with, they will automatically join your chapter.
+      <br>3. You will receive a notification when a new member joins your chapter so that you can approve them.
+    </p>
+    <p style="font-size: 11pt;">
+    <strong>Tips</strong>
+    <ul style="font-size: 11pt; margin-top: -1em;">
+      <li>Email addresses must be separated by comma, space or newline.</li>
+      <li>Users who already have an account will not be invited.</li>
+      <li>Only use email addresses that you have consent to contact.</li>
+      <li>Invitations may take a few minutes to arrive to the recipients.</li>
+    </ul>
+    </p>');
+  $output .= drupal_render($form);
+  $output .= views_embed_view('invitations', 'default');
+
+  // Check: has the user permission to access this page?
+  if(!user_access('tm invite all chapters')) {
+    $nid = _orig_nid();
+    if(!tm_users_is_chapter_leader($user->uid, $nid)) {
+      $output = drupal_access_denied();
+    }
+  }
+
+  return $output;
+
+}
+
+/* 
+ * Invitations form
+ */
+function tm_invitations_invite_form($form, &$form_state) {
+  
+  global $conf;
+  global $user;
+
+  // Reported members cannot invite
+  if (tm_users_is_member_reported($user->uid)) {
+    drupal_goto("/");
+  }
+
+  $description = 'Email addresses must be separated by comma, space or newline.';
+  if(!user_access('tm invite unlimited')) {
+    $description .= '<br>Enter up to 10 email addresses.';
+  }
+
+  if (_orig_nid() == 0) {
+    $form['help_message'] = array(
+    '#markup' => '<p>Help us grow the community and increase your connections by inviting your friends or colleagues.</p>'
+    );
+  }
+  
+  $form['invitations'] = array(
+    '#title' => 'Email Addresses',
+    '#type' =>'textarea',
+    '#rows' => 5,
+    '#description' =>t($description),
+  );
+
+  // only show custom message to approved users
+  if (in_array("approved user", $user->roles)) {
+    $form['custom_message'] = array(
+    '#title' => 'Custom Message',
+    '#type' =>'textarea',
+    '#rows' => 3,
+    '#description' => 'Add a custom message to you invitation. Links and HTML will be removed. You can also leave this blank.',
+    '#default_value' => $conf['tm_invitations_custom_message'] //Hi, I\'d like to invite you!'
+    );
+  }
+  
+  $nid = _orig_nid();
+  $form['nid'] = array(
+    '#type' =>'hidden',
+    '#default_value' => $nid,
+  );
+  $form['submit_button'] = array(
+    '#type' => 'submit',
+    '#value' => t('Send Invitations'),
+    '#id' => 'edit-submit',
+  );
+  return $form;
+}
+
+/* 
+ * Form validator
+ * Up to ten only
+ * valid email addresses from users that don't have an account
+ */
+function tm_invitations_invite_form_validate($form, &$form_state) {
+  $invalid = array();
+  $emails = preg_split("/[\s,]+/", $form_state['values']['invitations']);
+  $emails = array_unique($emails);
+  foreach ($emails as $email) {
+    $email = preg_replace('/[[:^print:]]/', '', $email);  // remove non printable characters for Android
+    $email = trim($email);
+    if ($email == '') {
+      continue;
+    }
+    if (!valid_email_address($email)) {
+      $invalid[] = $email;
+    }
+  }
+  // check permission for invite unlimited
+  if(!user_access('tm invite unlimited') && count($emails) > 10) {
+    form_set_error('invitations', t('You have entered more than ten emails'));
+  }
+  if ($invalid) {
+    $invalid = implode(", ", $invalid);
+    form_set_error('invitations', t('The following addresses are invalid: %invalid.', array('%invalid' => $invalid)));
+  }
+}
+
+/* 
+ * Submit function
+ */
+function tm_invitations_invite_form_submit($form_id, &$form_state) {
+
+  global $user;
+  $account = user_load($user->uid); 
+  $is_registered = array(); // keep track of users who are registered
+  $is_invited_to_chapter = array(); // keep track of users who are already invited to chapter
+  $is_invited_by_user = array(); // keep track of users who are already invited by this user
+  $emails = preg_split("/[\s,]+/", $form_state['values']['invitations']);
+  $emails = array_unique($emails);
+  $nid = $form_state['values']['nid'];
+  $custom_message = "";
+  if (isset($form_state['values']['custom_message']))  {
+    $custom_message = strip_tags($form_state['values']['custom_message']);
+    // Remove links for non-chapter leaders and non-moderators
+    if (!in_array("chapter leader", $account->roles) and !in_array("chapter leader", $account->roles)) {
+          $custom_message = preg_replace('@((https?://)?([-\w]+\.[-\w\.]+)+\w(:\d+)?(/([-\w/_\.]*(\?\S+)?)?)*)@', '(link removed)', $custom_message);
+    }
+  }
+  $count = 0;
+
+  // Get chapter title if invited to chapter
+  $chapter_title = "";
+
+  foreach($emails as $email){
+
+    // Step 1. Clean up email. Ignore blanks
+    $email = preg_replace('/[[:^print:]]/', '', $email);  // remove non printable characters for Android
+    $email = trim($email);
+    if ($email == '') {
+      continue;
+    }
+
+    // Step 2. Check if user is already signed up, or already invited to a chapter
+    $skip_invitation = false;
+    if (user_load_by_mail($email)){
+      $is_registered[] = $email; // user already exists
+      $skip_invitation = true;
+    }
+    if (($nid > 0) && (tm_invitations_check_if_invited_to_chapter($email, $nid))) {
+      $is_invited_to_chapter[] = $email; // user already invited to chapter
+      $skip_invitation = true;
+    }
+    if (($nid == 0) && (tm_invitations_check_if_invited_by_user($email, $user->uid))) {
+      $is_invited_by_user[] = $email; // user already invited by inviter 
+      $skip_invitation = true;
+    }
+
+    // Step 4. Send invitation to user
+    if (!$skip_invitation) {
+
+      // Check if inviting to chapter, if so get chapter title
+      if ($nid > 0) {
+        $chapter = node_load($nid);
+        $chapter_title = $chapter->title;
+      }
+
+      // Check user notification is checked: user_chapter_announcements
+      $queue = DrupalQueue::get('tm_invitations');
+
+      // Construct inviter's name for email
+      if (isset($account->language)) {
+        $language = LANGUAGE_NONE;
+      } else {
+        $language = $account->language;
+      }
+      $inviter_name = $account->name;
+      if (isset($account->field_user_first_name[$language])){
+        $inviter_name = $account->field_user_first_name[$language][0]['value'];
+        if (isset($account->field_user_last_name[$language])){
+          $inviter_name .= ' '.$account->field_user_last_name[$language][0]['value'];
+        }
+      }
+
+      // Get uid of inviter
+      $inviter_uid = $account->uid;
+
+      // Add to tm_invitations cron queue
+      $queue->createItem(["email" => $email, 
+                        "inviter_name" => $inviter_name,
+                        "inviter_uid" => $inviter_uid,
+                        "custom_message" => $custom_message,
+                        "chapter_name" => $chapter_title,
+                        "server_name" => $_SERVER["SERVER_NAME"]]);
+
+      // below is the non queue method
+      //tm_invitations_send_email($email, $account, $chapter_title);
+      
+      // Add invitation to database
+      $invite = db_insert('tm_invitations')
+        ->fields(array(
+          'email' => trim($email),
+          'uid' => $user->uid,
+          'nid' => $nid,
+          'followed' => 0,
+          'created' => REQUEST_TIME,
+        ))
+        ->execute();
+
+      $count++;
+    }
+  }
+  
+  // Step 5. Give user feedback about invitations sent
+  if ($nid > 0) {
+      // invited to chapter
+    if ($count > 0) {
+      drupal_set_message(t("Successfully sent $count invitations to join the " . $chapter_title . " chapter."));
+    }
+  }
+  else {
+    // regular user invited
+    if ($count == 1) {
+      drupal_set_message(t("Thanks for spreading the word. Your invitation has been sent."));
+    } elseif ($count > 1) {
+      drupal_set_message(t("Thanks for spreading the word. You've sent $count invitations."));
+    }
+  }
+  
+  // Step 6. Notice if users are already registered
+  if ($is_registered) {
+    $is_registered = implode(", ", $is_registered);
+    drupal_set_message(t('The following users already have accounts: %is_registered.', array('%is_registered' => $is_registered)));
+  }
+
+  // Step 7. Notice if users are already invited to chapter or by user
+  if ($is_invited_to_chapter) {
+    $is_invited_to_chapter = implode(", ", $is_invited_to_chapter);
+    drupal_set_message(t('The following addresses have already been sent invitations to join the chapter: %is_invited_to_chapter.', array('%is_invited_to_chapter' => $is_invited_to_chapter)));
+  }
+  if ($is_invited_by_user) {
+    $is_invited_by_user = implode(", ", $is_invited_by_user);
+    drupal_set_message(t('You\'ve already sent invitations to: %is_invited_by_user.', array('%is_invited_by_user' => $is_invited_by_user)));
+  }
+
+  // Step 8. Redirect user to profile page or chapter invite page
+  // remove pesky leading / from the redirect URL
+  if ($nid == 0) {
+    drupal_goto(ltrim(url("user/$user->uid", array('absolute' => FALSE)), "/"));
+  }
+  else {
+    drupal_goto(ltrim(url("node/$nid", array('absolute' => FALSE)) . "/invitations", "/"));
+  }
+
+}
+
+
+/*
+ * Helper method to see if a user has alread been invited to a chapter
+ */
+function tm_invitations_check_if_invited_to_chapter($email, $chapter_nid) {
+
+  $results = db_select('tm_invitations', 'i')
+      ->fields('i')
+      ->condition('email',$email,'=')
+      ->condition('nid',$chapter_nid,'=')
+      ->orderBy('created', 'DESC')
+      ->range(0,1)
+      ->execute()->fetchAll();
+
+  return (count($results) > 0);
+
+}
+
+/*
+ * Helper method to see if a user has alread been invited by that user
+ */
+function tm_invitations_check_if_invited_by_user($email, $inviter_uid) {
+
+  $results = db_select('tm_invitations', 'i')
+      ->fields('i')
+      ->condition('email',$email,'=')
+      ->condition('uid',$inviter_uid,'=')
+      ->orderBy('created', 'DESC')
+      ->range(0,1)
+      ->execute()->fetchAll();
+
+  return (count($results) > 0);
+
+}
+
+/*
+ * Hook user presave
+ * If there are multiple inviters, follow them all 
+ */
+function tm_invitations_user_insert(&$edit, $account, $category) {
+
+  $uid = $account->uid;
+  $max_invites = 8; // maximum number of invitations to handle
+
+  // Step 1. Check email in tm_invitations table, and if it there, use the last invite record.
+  $invites = db_select('tm_invitations', 'i')
+      ->fields('i')
+      ->condition('accepted',0,'=')
+      ->condition('email',$account->mail,'=')
+      ->orderBy('created', 'DESC')
+      ->range(0,$max_invites)
+      ->execute();
+
+  // Step 2. Loop through invites
+  $has_been_approved = false;
+  while ($invite = $invites->fetchAssoc()) {
+
+    // Step 3. If person who invited is a chapter leader, change to approved
+    // Note, this feature has been disabled because many members signed up with incomplete
+    // profile information. So we have decided to discontinue this feature.
+    // If you want members to be automatically approved then uncomment below.
+    /*if (!$has_been_approved) {
+
+      $inviter = user_load($invite['uid']);
+      if(user_access('tm invite own chapters', $inviter) || user_access('tm invite unlimited', $inviter)) {
+
+        if ($role = user_role_load_by_name('approved user')) {
+
+          // Set user to approved
+          user_multiple_role_edit(array($account->uid), 'add_role', $role->rid);
+
+          // Get approver profile url (either friendly url or community url)
+          $profile_url = "community/" . $account->name;
+          if (count($account->field_friendly_url['und']) > 0) { 
+            $profile_url = $account->field_friendly_url['und']['0']['value'];
+          }
+
+          // Send approval email
+          $approval_text = "Your account has been verified by " . $inviter->field_user_first_name[LANGUAGE_NONE][0]['value'] . ".";
+
+          tm_notifications_notify('user_approved', $account, array('approving-user' => $inviter, 'user' => $account, '__PROFILE_URL__' => $profile_url, '__APPROVAL_INTRO_TEXT__' => $approval_text));
+
+          // Display a message about approval
+          drupal_set_message(t('Your account has been pre-approved.'));
+          $has_been_approved = true;
+        }
+      }
+    }*/
+
+    // Step 4. Follow for the inviter if user invited them
+    if ($invite['nid'] == 0) {
+
+      // Check that invite['uid'] is valid.
+      $check_user = user_load($invite['uid']);
+      if ($check_user != null) {
+        $flag = flag_get_flag('follow_members');
+        $flag->flag('flag', $invite['uid'], $account, TRUE);
+      }
+     
+    }
+
+    // Step 5. Join Chapter if invited from chapter
+    if ($invite['nid'] > 0) {
+
+      // Check that invite['nid'] is valid.
+      $check_node = node_load($invite['nid']);
+      if ($check_node != null) {
+
+        $flag = flag_get_flag('signup');
+        $flag->flag('flag', $invite['nid'], $account, TRUE);
+        $chapter = node_load($invite['nid']);
+        $chapter_title = $chapter->title;
+        drupal_set_message(t('You have joined the ' . $chapter_title . " chapter."));
+      }
+
+    }
+
+    // Step 6. Update this record as accepted
+    db_update('tm_invitations')
+      ->fields(array(
+        'accepted' => REQUEST_TIME))
+      ->condition('id', $invite['id'], '=')
+      ->execute();
+  }
+
+}
+
+/**
+ * Implements hook_cron_queue_info().
+ */
+function tm_invitations_cron_queue_info() {
+  $queues = array();
+  $queues['tm_invitations'] = array(
+    'worker callback' => 'tm_invitations_send_email_cron', //function to call for each item
+    'time' => 120, //seconds to spend working on the queue
+  );
+  return $queues;
+}
+
+/**
+ * Cron call back to send invitation emails
+ * Wrapper to tm_invitations_send_email_cron_run($item) with exception handling
+ * 
+ */
+function tm_invitations_send_email_cron($item) {
+
+  try {
+    tm_invitations_send_email_cron_run($item);
+  }
+  catch (Exception $e) {
+    // If the process fails, log and the queue handler will remove the item.
+    try {
+      watchdog_exception("tm_invitations", $e, "tm_invitations_send_email_cron_run(): Queue item @item_id failed with message @message", array(
+          '@item_id' => $item->item_id,
+          '@message' => (string) $e,
+        ), WATCHDOG_ERROR);
+    } catch (Exception $e) {
+      // do nothing
+    }
+  }
+}
+
+/**
+ * Cron call back to send invitation emails
+ *
+ */
+function tm_invitations_send_email_cron_run($item) {
+  tm_invitations_send_email($item["email"], $item["inviter_name"], $item["inviter_uid"], $item["custom_message"], $item["chapter_name"], $item["server_name"]);
+}
+
+
+/* Email sending function */
+function tm_invitations_send_email($email, $inviter_name, $inviter_uid, $custom_message = "", $chapter_name = "", $server_name = "") {
+
+    global $conf;
+
+    $module = 'tm_invitations';
+    $key = 'key';
+    $language = language_default();
+    $params = array();
+    $from = NULL;
+    $send = FALSE;    
+
+    // CONSTRUCT MESSAGE
+    $member_url = url('user/'.$inviter_uid, array('absolute'=>TRUE));
+    $message = "Hi,";
+    $message .= "<br>";
+    if ($chapter_name != "") {
+      $message .= "<br>You've been invited to __SITE_NAME__ " . $chapter_name . " by " . $inviter_name . ".";
+    } else {
+      $message .= "<br>You've been invited to __SITE_NAME__ by " . $inviter_name . ".";
+    }
+    if (trim($custom_message) != "") {
+      $message .= "<p><strong>Message:</strong><br>";
+      $custom_message = strip_tags($custom_message); // remove html
+      $message .= str_replace("\n", "<br>", $custom_message); // add line breaks
+      $message .= "</p>";
+    }
+    $message .= "<br>Join the community by visiting <a href='__SERVER_HTTP__://__SERVER_NAME__'>__SERVER_NAME__</a>";
+    $message .= "<br>";
+    $message .= "<br>__EMAIL_SIGNOFF__";
+
+    // STEP 1. LOAD HTML TEMPLATE
+    $template_file_name = 'tm_notifications-email_template.tpl.php';
+    if (isset($conf["tm_email_custom_template"])) {
+      $template_file_name = $conf["tm_email_custom_template"];
+    }
+    $template_file = drupal_get_path('module', 'tm_notifications') . '/templates/' . $template_file_name;
+    $template = file_get_contents($template_file);
+
+
+    // STEP 2. SET MAIL HTML HEADERS
+    $email_message = drupal_mail($module, $key, $email, $language, $params, NULL, $send);
+    $email_message['headers']['MIME-Version'] = '1.0';
+    $email_message['headers']['Content-Type'] = 'multipart/mixed;';
+    $email_message['headers']['Content-Type'] = 'text/html;';
+
+
+    // STEP 3. SET SUBJECT 
+    if ($chapter_name != "") {
+      $email_message['subject'] = "Your Invitation to __SITE_NAME__ " . $chapter_name;
+    } else {
+      $email_message['subject'] = $inviter_name . " invited you to __SITE_NAME__";
+    }
+    $email_message['subject'] = str_replace("__SITE_NAME__", $conf["tm_site_name"], $email_message['subject']);
+
+
+    // STEP 4. REPLACE BODY AND FOOTER IN HTML TEMPLATE
+    $template = str_replace("__EMAIL_BODY__", $message, $template);
+    $footer = $conf["tm_email_default_footer"];
+    if (isset ($params['footer'])) {
+      $footer = $params['footer'];
+    }
+    $template = str_replace("__EMAIL_FOOTER__", $footer, $template);
+
+    // Other vars
+    $template = str_replace("__UNSUBSCRIBE_LINK__", "", $template);
+    $template = str_replace("__SERVER_NAME__", $server_name, $template);
+    //$template = str_replace("__SERVER_NAME__", $_SERVER["SERVER_NAME"], $template); 
+    $template = str_replace("__SERVER_HTTP__", $conf["tm_email_server_http"], $template);  
+    $template = str_replace("__SITE_NAME__", $conf["tm_site_name"], $template);  
+    $template = str_replace("__EMAIL_SIGNOFF__", $conf["tm_email_signoff"], $template);
+    $template = str_replace("__EMAIL_BRAND_MESSAGE__", "", $template); // disable brand message
+    $template = str_replace("__HERO_IMAGE__", "", $template); // remove hero image
+    $template = str_replace("__HERO_HEADLINE__", "", $template); // remove hero headline
+    $template = str_replace("__PREHEADER_TEXT__", "", $template); // preheader text
+
+    // STEP 5. LOAD HTML TEMPLATE INTO EMAIL BODY
+    $email_message['body'] = $template;
+
+    // STEP 6. SEND EMAIL
+    // Retrieve the responsible implementation for this message.
+    $system = drupal_mail_system($module, $key);
+
+    // Format the message body.
+    $format_message = $system->format($email_message);
+
+    // Send e-mail.
+    $result = $system->mail($format_message);
+}

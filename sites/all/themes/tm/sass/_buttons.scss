@@ -1,0 +1,491 @@
+button {
+  &:hover,
+  &:focus {
+    outline: none;
+  }
+}
+
+/* Base button style */
+.bttn,
+.form-download,
+.form-submit {
+  display: inline-block;
+  border-radius: $global-radius;
+  font-weight: $body-font-bold;
+  text-align: center;
+  @import "compass/css3";
+  @import "compass/css3/user-interface";
+  @include user-select(none);
+  cursor: pointer;
+  white-space: nowrap;
+  background: #FFF;
+  border: 0;
+
+  &:link,
+  &:active,
+  &:visited {
+    position: static;
+    top: 0;
+  }
+  &:active {
+    opacity: 1;
+  }
+  &:hover,
+  &:focus {
+    outline: none;
+  }
+  &:before, &:after {
+    font-weight: normal;
+    font-size: rem-calc(16);
+    vertical-align: bottom !important;
+  }
+  &:before {
+    margin-right: 0.375rem;
+  }
+  &:after {
+    margin-left: 0.375rem;
+    opacity: 0.4;
+  }
+  &.settings {
+    width: 3rem;
+    &:before {
+      @extend .icon-2016-dots;
+      font-size: 24pt;
+    }
+  }
+  &.communication {
+    width: 3rem;
+    &:before {
+      @extend .icon-bubble;
+    }
+  }
+  &.follow,
+  &.external,
+  &.past-event,
+  &.edit {
+    width: 9rem;
+    &:before {
+      margin-left: -0.5rem;
+    }
+  }
+  &.follow:before { @extend .icon-s-add; }
+  &.external:before { @extend .icon-s-new-window; }
+  &.edit:before { @extend .icon-pencil; }
+  &.follow.on:before,
+  &.follow.flagged:before {
+    @extend .icon-s-tick;
+  }
+  &.hide-txt {
+    &:before {
+      margin-right: 0;
+    }
+    span {
+      @extend .visually-hidden;
+    }
+  }
+}
+
+.bttn-dropdown {
+  &:after {
+    @extend .icon-s-arr-down;
+    margin-left: rem-calc(4);
+    opacity: 0.6;
+  }
+}
+
+.bttn-blk {
+  display: block;
+  width: 100%;
+}
+
+/* Button sizes */
+
+/* 24px */
+.bttn-s {
+  line-height: 1.25rem;
+  font-size: 0.875rem;
+  padding: 0.125rem 0.5rem;
+  min-height: 1.25rem;
+}
+
+/* 32px */
+.bttn-m {
+  line-height: 1.5rem !important;
+  font-size: 1rem;
+  padding: 0.25rem 0.75rem !important;
+  min-height: 2rem;
+}
+
+/* 40px */
+.bttn-l {
+  line-height: 1.75rem;
+  font-size: 1.25rem;
+  padding: 0.375rem 1rem;
+  min-height: 2.5rem;
+}
+
+/* 44px */
+.bttn-xl {
+  line-height: 1.75rem;
+  font-size: 1.25rem;
+  padding: 0.5rem 1.25rem;
+  min-height: 2.75rem;
+}
+
+/* Button colors */
+
+// White
+.bttn-default {
+  color: $primary-color;
+  background: #FFF;
+  border-color: tint($primary-color, 75%);
+  &:before {
+    color: $secondary-color;
+  }
+  &:hover, &:focus {
+    color: $primary-color;
+  }
+  &:active, &.on, &.flagged {
+    color: $primary-color;
+    box-shadow: 0 1px 0 0 rgba(#FFF, 0.5), inset 0 2px 0 0 rgba($primary-color, 0.1);
+  }
+}
+
+// Dark grey
+.bttn-primary {
+  color: #FFF;
+  background: tint($primary-color, 30%);
+  @extend %antialiased;
+  box-shadow: inset 0 -2px 0 0 tint($primary-color, 10%);
+  &:hover, &:focus {
+    color: #FFF;
+  }
+  &:active, &.on, &.flagged {
+    background: tint($primary-color, 10%) !important;
+    box-shadow: inset 0 2px 0 0 shade($primary-color, 20%);
+    color: #FFF;
+  }
+}
+
+// Blue
+.bttn-secondary {
+  color: #FFF !important;
+  background: $secondary-color !important;
+  @extend %antialiased;
+  box-shadow: inset 0 -2px 0 0 shade($secondary-color, 30%);
+  &:hover, &:focus {
+    color: #FFF !important;
+  }
+  &:active, &.on, &.flagged {
+    background: shade($secondary-color, 30%) !important;
+    box-shadow: inset 0 2px 0 0 shade($secondary-color, 50%);
+    color: #FFF !important;
+  }
+}
+
+// Light grey
+.bttn-tertiary {
+  color: tint($primary-color, 20%) !important;
+  background: tint($primary-color, 90%);
+  @extend %antialiased;
+  box-shadow: inset 0 -2px 0 0 tint($primary-color, 80%);
+  &:hover, &:focus {
+    color: tint($primary-color, 20%) !important;
+  }
+  &:active, &.on, &.flagged {
+    background: tint($primary-color, 80%);
+    box-shadow: inset 0 2px 0 0 tint($primary-color, 70%);
+    color: tint($primary-color, 20%) !important;
+  }
+}
+
+// Reddish
+.bttn-danger {
+  color: #FFF !important;
+  background: $danger-color;
+  @extend %antialiased;
+  box-shadow: inset 0 -2px 0 0 shade($danger-color, 30%);
+  &:hover, &:focus {
+    color: #FFF !important;
+  }
+  &:active, &.on, &.flagged {
+    background: shade($danger-color, 30%);
+    box-shadow: inset 0 2px 0 0 shade($danger-color, 50%);
+    color: #FFF !important;
+  }
+}
+
+// Turquoise
+.bttn-success {
+  color: #FFF !important;
+  background: $success-color;
+  @extend %antialiased;
+  box-shadow: inset 0 -2px 0 0 shade($success-color, 30%);
+  &:hover, &:focus {
+    color: #FFF !important;
+  }
+  &:active, &.on, &.flagged {
+    background: shade($success-color, 30%);
+    box-shadow: inset 0 2px 0 0 shade($success-color, 50%);
+    color: #FFF !important;
+  }
+}
+
+.bttn, button {
+  &.disabled {
+    opacity: 0.4;
+    cursor: default;
+
+    &:active {
+      position: static;
+      top: 0;
+      opacity: 0.4;
+    }
+  }
+}
+
+// Facebook
+.bttn-facebook {
+  color: #FFF !important;
+  background: #3b5898 !important;
+  @extend %antialiased;
+  box-shadow: inset 0 -2px 0 0 shade(#5877cf, 30%);
+  &:hover, &:focus {
+    color: #FFF !important;
+    background: #5877cf !important;
+    opacity: 1 !important;
+  }
+  &:active, &.on, &.flagged {
+    background: #5877cf !important;
+    box-shadow: inset 0 2px 0 0 shade(#5877cf, 50%);
+    color: #FFF !important;
+  }
+}
+
+// Twitter
+.bttn-twitter {
+  color: #FFF !important;
+  background: #1da1f2 !important;
+  @extend %antialiased;
+  box-shadow: inset 0 -2px 0 0 shade($secondary-color, 30%);
+  &:hover, &:focus {
+    color: #FFF !important;
+  }
+  &:active, &.on, &.flagged {
+    background: #1da1f2 !important;
+    box-shadow: inset 0 2px 0 0 shade($secondary-color, 50%);
+    color: #FFF !important;
+  }
+}
+
+/* Button group */
+
+.bttn-group {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  background: none;
+  > *,
+  > .is-active {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    text-shadow: none;
+    border-radius: 0;
+    a {
+      border-radius: 0;
+    }
+    &:first-child {
+      a {
+        border-top-left-radius: $global-radius;
+        border-bottom-left-radius: $global-radius;
+      }
+    }
+    &:last-child {
+      a {
+        border-top-right-radius: $global-radius;
+        border-bottom-right-radius: $global-radius;
+      }
+    }
+  }
+  a {
+    @extend .bttn, .bttn-primary, .bttn-m;
+    letter-spacing: inherit;
+    &:hover {
+      background-color: inherit;
+    }
+  }
+  a.is-active {
+    @extend .bttn-primary.on;
+    border: 0;
+    letter-spacing: inherit;
+  }
+}
+
+.pager {
+  display: inline-block;
+  @extend %antialiased;
+  li a {
+    @extend .bttn, .bttn-primary, .bttn-m;
+  }
+  .pager-current {
+    @extend .bttn, .bttn-primary.on, .bttn-m;
+  }
+  li a, .pager-current {
+    border-radius: 0;
+  }
+  li:first-child,
+  li:first-child a {
+    border-top-left-radius: $global-radius;
+    border-bottom-left-radius: $global-radius;
+  }
+  li:last-child,
+  li:last-child a {
+    border-top-right-radius: $global-radius;
+    border-bottom-right-radius: $global-radius;
+  }
+}
+
+/* Dropdown */
+.dropd {
+  min-width: 12.5rem;
+  position: absolute;
+  left: 0;
+  z-index: 10;
+  border-radius: $global-radius;
+  box-shadow: 0 0 0 0.125rem rgba($primary-color, 0.1);
+  background: rgba(#FFF, 0.95);
+  padding: 1rem;
+
+  opacity: 0;
+  margin-top: -0.5rem;
+  visibility: hidden;
+  @include transition-property(opacity, margin, visibility);
+  @include transition-duration(0.1s, 0.1s, 0.1s);
+  @include transition-timing-function(ease, ease, linear);
+  @include transition-delay(0, 0, 0);
+
+  &:before {
+    @extend .icon-triangle-up;
+    position: absolute;
+    z-index: 15;
+    top: -11px;
+    left: 1rem;
+    color: rgba(#FFF, 0.95);
+    font-size: 1rem;
+    text-shadow: 0 -0.135rem rgba($primary-color, 0.1);
+    line-height: 1;
+    height: 1rem;
+    width: 1rem;
+  }
+
+  &.dropd-right {
+    left: auto;
+    right: 0;
+    &:before {
+      left: auto;
+      right: 1rem;
+    }
+  }
+
+  &.dropd-center {
+    left: 50%;
+    margin-left: -6.25rem;
+    &:before {
+      left: 50%;
+      margin-left: -0.5rem;
+    }
+  }
+
+  &.on {
+    opacity: 1;
+    margin-top: 0.75rem;
+    visibility: visible;
+  }
+
+  .dropd-menu {
+    list-style: none;
+    padding: 0.5rem 0;
+    margin: 0 -1rem;
+    font-size: 0.85rem;
+    line-height: 1.25rem;
+    border-bottom: 1px solid tint($primary-color, 90%);
+
+    &:first-child {
+      margin-top: -0.75rem;
+    }
+
+    &:last-child {
+      margin-bottom: -0.75rem;
+      border: none;
+    }
+    li {
+      position: relative;
+      z-index: 20;
+      margin: 0;
+      a {
+        display: block;
+        padding: 0.25rem 1rem;
+        color: $primary-color;
+        background-color: transparent;
+
+        @include transition-property(background-color, top, left, right);
+        @include transition-duration(0.2s, 0.1s, 0.2s, 0.2s);
+        @include transition-timing-function(ease, ease, ease, ease);
+        @include transition-delay(0, 0, 0, 0);
+
+        &:hover {
+          opacity: 1;
+          background-color: rgba(tint($secondary-color, 50%), 0.2);
+          color: $secondary-color;
+        }
+
+        &:before {
+          vertical-align: bottom !important;
+          font-weight: normal;
+          color: $secondary-color;
+          margin-right: 0.5rem;
+        }
+      }
+    }
+  }
+}
+/* Approval status */
+.approval {
+  text-align: center;
+  color: #1b2430;
+  line-height: 1em; 
+  margin-top: 0.2em;
+  margin-bottom: 0px;
+}
+.approval img {
+  margin-bottom: -3px; 
+  padding-right: 4px;
+}
+.text_approved {
+  font-size: 0.8em;
+}
+.text_notapproved {
+  font-size: 0.8em;
+}
+.text_subscriber {
+  font-size: 0.8em;
+}
+
+/* Edit image buttons */
+.image-edit-button { color: #4d5767; background-color: #fff; border: none; border-radius: 3px; font-size: 14px; padding-left: 4px; padding-right: 4px; opacity: 0.9 !important; border-bottom: 2px #888 solid;}
+.image-edit-button:hover { opacity: 1.0 !important; }
+.image-edit-button:before { @extend .icon-pencil;}
+
+/* Upvote */
+.bttn.follow.upvote:before { @extend .icon-triangle-up; }
+.follow.on.upvote.flag-processed:before { @extend .icon-triangle-up; }
+.btn_upvote_count { 
+  color: #add8e6;
+}
+
+/* Donate */
+/* Upvote */
+.bttn.follow.donate-event:before { @extend .icon-arr-tail-right; }
+.follow.on.donate-event.flag-processed:before { @extend .icon-arr-tail-right; }

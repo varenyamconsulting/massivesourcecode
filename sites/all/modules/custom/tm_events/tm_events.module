@@ -1,0 +1,601 @@
+<?php
+/**
+ * @file
+ * Code for the TM Events feature.
+ * 
+ * @author Ian C (ian@travelmassive.com)
+ */
+
+include_once 'tm_events.features.inc';
+include_once 'tm_events.communication.inc';
+include_once 'tm_events.helpers.inc';
+include_once 'tm_events.registration.inc';
+include_once 'tm_events.csv.inc';
+include_once 'tm_events.token.inc';
+include_once 'tm_events.contact.inc';
+include_once 'tm_events.display.inc';
+include_once 'tm_events.permissions.inc';
+include_once 'tm_events.edit.inc';
+include_once 'tm_events.flags.inc';
+include_once 'tm_events.ical.inc';
+include_once 'tm_events.moderation.inc';
+include_once 'tm_events.grants.inc';
+include_once 'tm_events.chatbox.inc';
+include_once 'tm_events.livestream.inc';
+include_once 'tm_events.drush.inc';
+include_once 'tm_events.add.inc';
+
+/*
+* Implements hook_menu()
+*/
+function tm_events_menu() {
+  // need to change the permissions on both of these 
+  // to be chapter leaders of the referenced event
+  $items['events/send-announcement/%node'] = array(
+    'title' => t('Send Announcement'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('tm_events_communication_form'),
+    'access callback' => 'tm_events_check_announcement_callback',
+    'attributes' => array('class' => 'classname'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['events/manage-registrations/%node'] = array(
+    'title' => t('Manage registrations'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('tm_events_manage_registrations_form'),
+    'access callback' => 'tm_events_check_permission_callback',
+    'type' => MENU_CALLBACK,
+  );
+   $items['events/download-csv/%'] = array(
+    'title' => t('Download Attendee List'),
+    'page callback' => 'tm_events_download_csv',
+    'page arguments' => array(2),
+    'access callback' => 'tm_events_download_csv_check',
+    'type' => MENU_CALLBACK,
+  );
+  $items['events/download-csv/%/confirm'] = array(
+    'title' => t('Download RSVPs'),
+    'page callback' => 'tm_events_download_csv_confirm',
+    'page arguments' => array(2),
+    'access callback' => 'tm_events_download_csv_check',
+    'type' => MENU_CALLBACK,
+  );
+  $items['events/send-announcement-test/%node'] = array(
+    'title' => t('Send test email'),
+    'page callback' => 'tm_events_test_email_ajax',
+    'access callback' => 'tm_events_check_announcement_callback',
+    'type' => MENU_CALLBACK,
+  );
+  $items['events/send-announcement-callback/%node'] = array(
+    'title' => t('Send event emails'),
+    'page callback' => 'tm_events_send_emails_ajax',
+    'access callback' => 'tm_events_check_announcement_callback',
+    'type' => MENU_CALLBACK,
+  );
+  $items['events/message/%node'] = array(
+    'title' => t('Message event organizers'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('tm_events_contact_form',1),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  $items['node/new/event'] = array(
+    'title' => t('New event'),
+    'page callback' => 'tm_events_new_event',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  $items['events/download-ical/%'] = array(
+    'title' => t('Download iCal'),
+    'page callback' => 'tm_events_download_ical',
+    'page arguments' => array(2),
+    'access callback' => 'tm_events_download_ical_check',
+    'type' => MENU_CALLBACK,
+  );
+  $items['events/moderation-event-list-ajax/%/%'] = array(
+    'title' => 'Event list ajax',
+    'page callback' => 'tm_events_moderation_events_list_ajax',
+    'access arguments' => array('approve users'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['events/moderation-event-register-member/%/%'] = array(
+    'title' => 'Register member to event',
+    'page callback' => 'tm_events_moderation_events_register_member_callback',
+    'access arguments' => array('approve users'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['events/last-changed/%'] = array(
+    'title' => t('Check when last changed'),
+    'page callback' => 'tm_events_check_last_changed_ajax',
+    'page arguments' => array(2),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  $items['events/seconds-to-event-callback/%'] = array(
+    'title' => t('Get seconds to event'),
+    'page callback' => 'tm_events_seconds_until_event_starts_ajax',
+    'page arguments' => array(2),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  $items['events/moderation-chatbox/%'] = array(
+    'title' => t('Live Chat Moderation'),
+    'page callback' => 'tm_event_chatbox_moderator_page',
+    'page arguments' => array(2),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  $items['events/send-test-reminder/%/%'] = array(
+    'title' => t('Send test reminder email'),
+    'page callback' => 'tm_events_send_test_reminder_callback',
+    'page arguments' => array(2, 3),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  $items['events/display-live-stream-callback/%/%'] = array(
+    'title' => t('Display live stream callback'),
+    'page callback' => 'tm_events_livestream_toggle_callback',
+    'page arguments' => array(2, 3),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  $items['events/add'] = array(
+    'title' => 'Add event',
+    'page callback' => 'tm_events_add_page',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  return $items;
+}
+
+/**
+ * Implement hook_ds_field_info()
+ */
+// see: https://ohthehugemanatee.org/blog/2014/04/02/how-to-create-a-custom-display-suite-field/
+function tm_events_ds_fields_info($entity_type) {
+  if ($entity_type != 'node') {
+    return;
+  }
+  $fields = array();
+
+  $fields['tm_ds_next_event'] = array(
+    'title' => t('Next event'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('chapter|*'),
+    'function' => '_tm_next_event'
+  );
+
+  $fields['tm_ds_date_avatar'] = array(
+    'title' => t('Date avatar'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('event|*',),
+    'function' => '_tm_date_avatar'
+  );
+
+  $fields['tm_ds_fulldate_event'] = array(
+    'title' => t('Full datetime event'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('event|full',),
+    'function' => '_tm_fulldate_event'
+  );
+
+  $fields['tm_ds_event_message'] = array(
+    'title' => t('Event message'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('event|full',),
+    'function' => '_tm_event_message'
+  );
+
+  $fields['tm_ds_event_location'] = array(
+    'title' => t('Event location'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('event|full',),
+    'function' => '_tm_event_location'
+  );
+
+  $fields['tm_ds_event_chatbox'] = array(
+    'title' => t('Event chatbox'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('event|full',),
+    'function' => '_tm_event_chatbox'
+  );
+
+  $fields['tm_ds_event_livestream'] = array(
+    'title' => t('Event live stream'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('event|full',),
+    'function' => '_tm_event_livestream'
+  );
+
+  $fields['tm_ds_event_online_instructions'] = array(
+    'title' => t('Online instructions'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('event|full',),
+    'function' => '_tm_event_online_instructions'
+  );
+
+  return array($entity_type => $fields);
+}
+
+/**
+ * Implement hook_theme()
+ */
+function tm_events_theme() {
+  return array(
+    'tm_date_avatar' => array(
+      'variables' => array(
+        'date' => NULL
+      ),
+      'path' => drupal_get_path('module','tm_events') . '/templates/fields',
+      'template' => 'tm_date_avatar'
+    )
+  );
+}
+
+/* 
+ * Hook - Add sort toggles to events page
+ */
+function tm_events_page_alter(&$page) {
+
+  global $user;
+  global $conf;
+
+  // Split url parts
+  $url_parts = explode("/", request_path());
+
+  // catch either:
+  // /events
+  // /events/list/conferences
+  if (($url_parts[0] == "events") and ((sizeof($url_parts) == 1) or (sizeof($url_parts) == 3))) {
+
+    // only show for /events/list/etc
+    if ((sizeof($url_parts) == 3) and ($url_parts[1] != "list")) {
+      return;
+    }
+
+    $event_types = array();
+    $default_event_type = "";
+   
+    if (!isset($conf["tm_event_types"])) { return; }
+    if (!isset($conf["tm_event_types_display"])) { return; }
+    if (!isset($conf["tm_event_types_default"])) { return; }
+
+    // get event types from config
+    $event_types = $conf["tm_event_types"];
+    $tm_event_types_display = $conf["tm_event_types_display"];
+    $default_event_type = $conf["tm_event_types_default"];
+    
+    $url_event_type = $default_event_type; // default list method
+    if (sizeof($url_parts) == 3) {
+      $url_event_type = $url_parts[2]; // ie: title for /events/list/conferences
+    }
+   
+    // create buttons
+    $html = '<ul class="tabs-primary tabs primary">';
+    foreach ($tm_event_types_display as $event_type => $name) {
+
+      $css_classes = "";
+      if ($url_event_type == $event_type) { 
+        $css_classes = "is-active active ";
+      }
+      $css_classes .= "event-type-" . $event_type;
+
+      $url_arg = "";
+      if ($event_type != $default_event_type) {
+        $url_arg = "/list/" . $event_type;
+      }
+
+      $html .= '<li class="tabs-primary__tab ' . $css_classes . '">
+        <a href="/events' . $url_arg . '" class="tabs-primary__tab-link '.$css_classes.'">' . $name . '</a>
+      </li>';
+    }
+    $html .= '</ul>';
+
+    // add html to page header
+    $page['header'] = array('#markup' => $html);
+
+  }
+
+  // Check if visitor can view event attendee list
+  // ie: /node/123/attendees
+  if ((arg(0) == "node") and is_numeric(arg(1)) and (arg(2) == "attendees")) {
+
+    // Valid node
+    $event = node_load(arg(1));
+    if ($event == null) {
+      return;
+    }
+    if ($event->type != 'event') {
+      return;
+    }
+
+    // Must be logged in
+    if (!user_is_logged_in()) {
+      $message = "Please <a href='/user/login?destination=/node/" . arg(1) . "/attendees'>log in</a> to your account to see who is attending.";
+      drupal_set_message($message, 'help-tip');
+      drupal_goto("node/" . arg(1));
+    }
+
+    // Must be approved
+    $account = user_load($user->uid);
+    if (!in_array('approved user', $account->roles)) {
+      $message = "You must be an approved member to see who is attending this event.";
+      drupal_set_message($message, 'help-tip');
+      drupal_goto("node/" . arg(1));
+    }
+  }
+  
+
+}
+
+/*
+ * Hook - Update title of events page
+ */
+function tm_events_views_post_execute(&$view) {
+ 
+  // make sure we are on events page
+  if ($view->name == 'events') {
+
+    // Split url parts
+    $url_parts = explode("/", request_path());
+
+    // catch either:
+    // /events
+    // /events/list/conferences
+    if (($url_parts[0] == "events") and (sizeof($url_parts) == 3)) {
+
+      global $conf;
+      // get event types from config
+      if (!isset($conf["tm_event_types_display"])) { return; }
+      $tm_event_types_display = $conf["tm_event_types_display"];
+
+      // Step 1. Change Title
+      // if we match event type, change the page title
+      $url_event_type = $url_parts[2];
+      if (array_key_exists($url_event_type, $tm_event_types_display)) {
+        $view->build_info['title'] = $tm_event_types_display[$url_event_type];
+      }
+
+      // Step 2. Show Event Tip
+      if (isset($conf['tm_event_types_tips'][$url_event_type])) {
+        $tip = $conf['tm_event_types_tips'][$url_event_type];
+        
+        // lookup and replace stats from api data
+        if (module_exists("tm_api")) {
+          $api_data = tm_api_stats_get_data();
+          $tip = tm_api_replace_text_fields($api_data, $tip);
+        }
+
+        drupal_set_message($tip, 'page_notice');
+      }
+    }
+  }
+}
+
+/**
+ * Hook - Set default images
+ * Refer to settings.php configuration
+ */
+function tm_events_preprocess_field(&$variables) {
+
+  global $conf;
+
+  // Check element type
+  $element_type = null;
+  if (isset($variables['element']['#object']->type)) {
+    $element_type = $variables['element']['#object']->type;
+  }
+
+  // Only operate on event
+  if ($element_type != "event") {
+    return;
+  }
+
+  // Replace default cover image
+  if ($variables['element']['#field_name'] == 'field_image') {
+    $variables['items'][0]['#item']['uri'] = _tm_events_get_default_image($variables['items'][0]['#item']['uri'], $variables['element']['#object']->nid);
+  }
+
+}
+
+/** 
+ * Hook - Alter event node
+ * Hide organizers if field_event_hide_organizers set
+ */
+function tm_events_node_view($node, $view_mode, $langcode) {
+
+  global $user;
+  global $conf;
+
+  // Check event
+  if ($node->type != 'event') {
+    return;
+  }
+
+  if ($view_mode == 'full') {
+
+    // hide organizers
+    if (isset($node->field_event_hide_organizers[LANGUAGE_NONE][0])) {
+      if ($node->field_event_hide_organizers[LANGUAGE_NONE][0]['value']) {
+
+        // http://timonweb.com/posts/programmatically-hiding-a-fieldgroup-on-a-node-display-in-drupal-7/
+        $node->content['#groups']['group_organizers_wrapper']->format_type = 'hidden';
+        hide($node->content['field_organizer']);  
+      }
+    }
+
+    // preview mode
+    if (tm_events_is_preview_mode($node->nid)) {
+        drupal_set_message("This event is in Preview mode. Only people with the link can see this event.", "help-tip");
+    }
+
+    // if event has chapter, drop cookie via javascript to set default chapter on signup page
+    if (isset($node->field_chapter[LANGUAGE_NONE][0]['target_id'])) {
+      $chapter_id = $node->field_chapter[LANGUAGE_NONE][0]['target_id'];
+      drupal_add_js(array('chapter_referral_id' => array('id' => $chapter_id)), array('type' => 'setting'));
+      drupal_add_js(drupal_get_path('module', 'tm_chapters') . '/js/tm_chapters_referral.js');
+    }
+
+    // show reminder to send announcement
+    // exclude external rsvp events
+    if (tm_events_check_permission_edit_event($user, $node)) {
+
+      // dont show tips if custom banner showing
+      $custom_banner = tm_events_get_custom_banner($node);
+      if ($custom_banner == "") {
+         tm_events_show_announcement_tip($node);
+      }
+    }
+
+    // check for updates and reload page if updated
+    drupal_add_js(array('tm_events' => array('tm_event_changed_nid' => $node->nid)), array('type' => 'setting'));
+    drupal_add_js(array('tm_events' => array('tm_event_changed_user_is_logged_in' => user_is_logged_in())), array('type' => 'setting'));
+    if (isset($conf["tm_event_check_updates_seconds"])) {
+      $check_updates_timeout = $conf["tm_event_check_updates_seconds"] * 1000;
+      drupal_add_js(array('tm_events' => array('tm_event_changed_timestamp' => $node->changed)), array('type' => 'setting'));
+      drupal_add_js(array('tm_events' => array('tm_event_changed_refresh' => $check_updates_timeout)), array('type' => 'setting'));
+      drupal_add_js(drupal_get_path('module', 'tm_events') . '/js/tm_events_check_updates.js');
+    }
+
+    // include chatbox css and js
+    if (tm_event_chatbox_check_display($user, $node)) {
+      $account = user_load($user->uid);
+      $widget_js = tm_event_chatbox_widget_js($account, $node);
+      drupal_add_js($widget_js, array('type' => 'inline', 'scope' => 'footer'));
+    }
+
+    // add css if chatbox enabled
+    if (isset($node->field_event_chatbox_enabled[LANGUAGE_NONE][0]['value'])) {
+      if ($node->field_event_chatbox_enabled[LANGUAGE_NONE][0]['value'] == 1) {
+        drupal_add_css(drupal_get_path('module', 'tm_events') . '/css/tm_events_chatbox.css');
+      }
+    }
+
+    // show live stream
+    $is_displaying_live_stream = false;
+    if (tm_event_livestream_check_display($user, $node)) {
+
+      $is_displaying_live_stream = true;
+
+      // hide header
+      drupal_add_css(".trilithon-header.contained { display: none; }", "inline");
+
+      // add fitvids to scale video
+      drupal_add_js(drupal_get_path('module', 'tm_events') . '/js/tm_events_fitvids.js');
+
+      // add video size controls
+      drupal_add_js(drupal_get_path('module', 'tm_events') . '/js/tm_events_livestream_controls.js');
+      drupal_add_css(drupal_get_path('module', 'tm_events') . '/css/tm_events_livestream.css');
+
+      // show moderator tools
+      if (tm_events_check_permission_edit_event($user, $node)) {
+
+        $livestream_url = tm_event_get_livestream_url($node);
+        $livestream_video_id = tm_event_get_youtube_video_id($livestream_url);
+        $livestream_external_url = "https://www.youtube.com/watch?v=" . $livestream_video_id;
+
+        // livestream mode
+        $livestream_mode_label = tm_event_livestream_get_mode_label($node);
+        $label = "Live stream";
+        if (tm_events_is_past_event($node)) {
+          $label = "Event replay";
+        }
+        $message = $label . " is now displayed to <b>" . $livestream_mode_label . "</b>. ";
+
+        drupal_add_css(".tm-more-actions { position: absolute; top: 26px; right: 26px; list-style: none; } .messages.help-tip { padding-right: 64px; } ", "inline");
+        drupal_add_js("jQuery(document).ready(function () { jQuery('.tm-more-actions').appendTo('.header-wrapper'); });", "inline");
+        drupal_set_message($message, "help-tip");
+      }
+    } else {
+      // show reason why live stream not displaying, if required
+      // ie: you need to log in to view the live stream
+      tm_event_livestream_show_display_message($user, $node);
+    }
+
+    // warn event editor if live stream url if invalid
+    if (user_is_logged_in()) {
+      if (!tm_events_is_past_event($node) and (tm_event_get_livestream_url($node) != "")) {
+        if (tm_events_check_permission_edit_event($user, $node)) {
+          $livestream_url = tm_event_get_livestream_url($node);
+          $youtube_video_id = tm_event_get_youtube_video_id($livestream_url);
+          if ($youtube_video_id == "") {
+            drupal_set_message("The live stream URL <i>" . strip_tags($livestream_url) . "</i> is not a valid YouTube link.", "warning");
+          }
+        }
+      }
+    }
+
+    // show countdown timer for online events until live stream
+    if ((!$is_displaying_live_stream) and (!tm_events_is_past_event($node))) {
+      if (isset($node->field_event_is_online[LANGUAGE_NONE][0]['value'])) {
+        if ($node->field_event_is_online[LANGUAGE_NONE][0]['value'] == true) {
+          $seconds_until_start = tm_events_seconds_until_event_starts($node);
+          drupal_add_js(array('tm_events' => array('tm_event_seconds_until_start' => $seconds_until_start)), array('type' => 'setting'));
+          drupal_get_messages("countdown-timer");
+          drupal_set_message("<!--googleoff: index-->Going LIVE <span id='tm_events_countdown_text'></span><!--googleon: index-->", "countdown-timer");
+          drupal_add_js(drupal_get_path('module', 'tm_events') . '/js/tm_events_countdown_timer.js');
+        }
+      }
+    }
+
+  }
+}
+
+/**
+ * Return timestamp when event changed
+ */
+function tm_events_check_last_changed_ajax($nid) {
+
+  // get path alias
+  $event_url = "/" . drupal_get_path_alias("node/" . $nid);
+
+  // fast lookup changed
+  $query = "SELECT changed FROM node WHERE nid = :nid";
+  $result = db_query($query, array(':nid' => $nid))->fetch();
+  $changed = array("timestamp" => 0, "url" => $event_url);
+  if ($result != null) {
+     $changed = array("timestamp" => $result->changed, "url" => $event_url);
+  }
+
+  // check if we are embedding in a jsonp callback
+  if (isset($_GET["callback"])) {
+    // jsonp callback
+    // ie: mycallback({json_data});
+    drupal_add_http_header('Content-Type', 'application/javascript');
+    print($_GET["callback"] . "(" . json_encode($changed) . ");");
+  } else {
+    // standard json
+    // ie: {json_data}
+    print(json_encode($changed));
+  }
+  drupal_exit();
+}
+
+/**
+ * Return seconds until event starts
+ */
+function tm_events_seconds_until_event_starts_ajax($nid) {
+
+  // get seconds until start of event
+  $event = node_load(intval($nid));
+
+  if ($event == null) {
+     $result = array("seconds" => 0);
+  } else {
+    $seconds_until_start = tm_events_seconds_until_event_starts($event);
+    $result = array("seconds" => $seconds_until_start);
+  }
+
+  // check if we are embedding in a jsonp callback
+  if (isset($_GET["callback"])) {
+    // jsonp callback
+    // ie: mycallback({json_data});
+    drupal_add_http_header('Content-Type', 'application/javascript');
+    print($_GET["callback"] . "(" . json_encode($result) . ");");
+  } else {
+    // standard json
+    // ie: {json_data}
+    print(json_encode($result));
+  }
+  drupal_exit();
+}

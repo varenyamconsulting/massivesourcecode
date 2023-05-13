@@ -1,0 +1,172 @@
+<?php
+
+// tm_leaderboard.module
+
+include_once 'tm_leaderboard.display.inc';
+include_once 'tm_leaderboard.scores.inc';
+
+/**
+ * Implement hook_menu()
+ */
+function tm_leaderboard_menu() {
+
+   $items = array();
+
+   $items['leaderboard'] = array(
+    'title' => 'Chapter Leaderboard',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('tm_leaderboard_form'),
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+   );
+
+   return $items;
+}
+
+/**
+ * Show leaderboard
+ */
+function tm_leaderboard_form() {
+  
+  global $conf;
+  global $user;
+  
+  // Load css
+  drupal_add_css(drupal_get_path('module', 'tm_leaderboard') . '/css/tm_leaderboard.css');
+ 
+  // Check access to all rankings
+  if (isset($_GET["showall"])) {
+
+    if (!user_is_logged_in()) {
+      drupal_set_message("Please <a href='/user/login?destination=/leaderboard?showall'>sign in</a> to view all chapter rankings", "warning");
+      drupal_goto("/leaderboard");
+      return;
+    }
+
+    if (!in_array("chapter leader", $user->roles) and !in_array("moderator", $user->roles)) {
+      drupal_goto("/leaderboard");
+      return;
+    }
+  }
+
+  // Check cache
+  $cache = cache_get('tm-reports-all-chapter-insights', 'cache');
+  if (empty($cache)) {
+    $form['html'] =  array(
+    '#type' => 'markup',
+    '#markup' => "Sorry, the Chapter Leaderboard is not available right now. Please check back later.");
+    return $form;
+  }
+
+  // Start html
+  $html = "";
+
+  // Start article
+  $html .= "<article class='trilithon node view-mode-full node-by-viewer clearfix'>";
+
+  // Set cache key
+  $cache_key = "";
+  if (isset($_GET["region"])) {
+    $cache_key = $_GET["region"];
+  }
+  if (isset($_GET["country"])) {
+    $cache_key = $_GET["country"];
+  }
+  if (isset($_GET["members"])) {
+    $chapter_sizes = array(100,250,500,1000); // possible options
+    $chapter_members = intval($_GET["members"]);
+    if (in_array($chapter_members, $chapter_sizes)) {
+      $cache_key = $_GET["members"];
+    } else {
+      $cache_key = "showall";
+    }
+  }
+  if (isset($_GET["showall"])) {
+    $cache_key = "showall";
+    drupal_set_message($conf["tm_leaderboard_chapter_leaders_tip"], "help-tip");
+  }
+
+  // Fetch leaderboard from cache if available
+  $cache = cache_get('tm-leaderboard-' . $cache_key, 'cache');
+  if (!empty($cache) and (!isset($_GET["nocache"]))) {
+    $leaderboard_html = $cache->data;
+  } else {
+    $leaderboard_html = tm_leaderboard_render();
+    cache_set('tm-leaderboard-' . $cache_key, $leaderboard_html, 'cache', time() + 300);
+  }
+
+  // Render leaderboard
+  $html .= $leaderboard_html;
+
+  // Additional links
+  // Not cached
+  if (!isset($_GET["showall"])) {
+    if (in_array("chapter leader", $user->roles) or in_array("moderator", $user->roles)) {
+      $html .= "<div id='leaderboard_links_chapter_leader'>";
+      $html .= "<a class='bttn bttn-secondary bttn-m off' href='/leaderboard?showall'>See All Rankings</a>";
+      $html .= "</div>";
+    }
+  }
+
+  $html .= "<div id='leaderboard_links'>
+    Leaderboards &mdash; 
+    <a href='/leaderboard'>Top " . $conf["tm_leaderboard_global_show_results"] . "</a> &middot; 
+    <a href='/leaderboard?region=AS'>Asia</a>  &middot;
+    <a href='/leaderboard?region=AF'>Africa</a>  &middot;
+    <a href='/leaderboard?region=EU'>Europe</a>  &middot;
+    <a href='/leaderboard?region=NA'>North America</a>  &middot;
+    <a href='/leaderboard?region=SA'>South America</a>  &middot;
+    <a href='/leaderboard?region=OC'>Oceania</a>
+    <br>Specials &mdash; 
+    <a href='/leaderboard?members=500'>Emerging Chapters</a> &middot;
+    <a href='/leaderboard?country=US'>US Chapters</a>
+    </div>";
+
+  $html .= "</article>";
+
+  $form['html'] =  array(
+    '#type' => 'markup',
+    '#markup' => $html);
+
+  return $form;
+
+}
+
+/**
+ * Add html meta tags
+ * Called from tm/themes/template.php
+ */
+function tm_leaderboard_preprocess_html(&$variables, $hook) {
+
+  global $conf;
+
+  if (current_path() != "leaderboard") {
+    return;
+  }
+  
+  // og:image
+  if (isset($conf['tm_leaderboard_og_image'])) {
+    $meta = array(
+      '#tag' => 'meta', 
+      '#attributes' => array(
+        'name' => 'og:image', 
+        'content' => $conf['tm_leaderboard_og_image'],
+      ),
+    );
+    drupal_add_html_head($meta, 'og:image');
+  }
+
+  // description
+  if (isset($conf['tm_leaderboard_og_description'])) {
+    $meta = array(
+      '#tag' => 'meta', 
+      '#attributes' => array(
+        'name' => 'description',
+        'property' => 'og:description',
+        'content' => $conf['tm_leaderboard_og_description'],
+      ),
+    );
+    drupal_add_html_head($meta, 'description');
+  }
+
+}

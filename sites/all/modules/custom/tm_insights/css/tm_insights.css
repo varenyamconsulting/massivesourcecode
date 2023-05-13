@@ -1,0 +1,46 @@
+#page-title { display: none; }
+#main { min-height: 800px; }
+.messages--help-tip { margin-left: 0.2rem !important; margin-right: 0.2rem; }
+
+.google-visualization-table-tr-head { display: none; }
+.google-visualization-table-td-number { text-align: left !important; }
+
+.insightsSelect {
+	width: 400px;
+	margin: auto;
+	height: 28px;
+	color: #fff;
+}
+
+#insightsInput {
+  width: 400px;
+  margin: auto;
+  margin-bottom: 2rem;
+}
+
+#insightsInput h1 { 
+  text-align: center;
+}
+
+.insightsMessage { 
+	padding-right: 2rem;
+	padding-left: 2rem;
+	padding-bottom: 2rem;
+}
+
+.insightsNPS { 
+	display: none;
+}
+
+@media only screen and (max-width: 600px) {
+
+	.insightsSelect {
+		width: 300px;
+		color: #222;
+	}
+
+	#insightsInput {
+		width: 300px;
+	}
+}
+

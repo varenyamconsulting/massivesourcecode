@@ -1,0 +1,21 @@
+#livestream_video_container_buttons {
+	position: relative;
+	float: left;
+	margin-right: -46px;
+	margin-top: -70px;
+	float: right;
+}
+
+@media only screen and (max-width: 1298px) {
+	#livestream_video_container_buttons { 
+	  display: none;
+	}
+}
+
+@media only screen and (max-width: 400px) {
+	#livestream_video_container { 
+		width: 92% !important;
+		left: 0 !important;     
+		padding-right: 0 !important;
+	}
+}

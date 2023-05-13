@@ -1,0 +1,968 @@
+<?php
+
+/**
+ * @file
+ * Code for the TM Branding feature.
+ */
+
+include_once 'tm_branding.features.inc';
+
+/**
+ * Hook node_access
+ * Only allow brand-editors or administrators to view the node
+ */
+function tm_branding_node_access($node, $op, $account) {
+
+	if (is_string($node)) {
+		return NODE_ACCESS_IGNORE;
+	}
+
+	// only allow brand editor to view
+	if ($node->type == 'site_brand' && $op == 'view') {
+		$allowed_roles = array('brand-editor', 'administrator');
+		$access_allow = array_intersect($allowed_roles, array_values($account->roles));
+		if ($access_allow) {
+			return NODE_ACCESS_ALLOW;
+		} else {
+			return NODE_ACCESS_DENY;
+		}
+	}
+	return NODE_ACCESS_IGNORE;
+}
+
+/**
+ * Return a list of matching site brands in order or processing priority
+ */
+function tm_branding_get_site_brands($account) {
+
+	// Get all site brands sorted by process_order
+	$query = "select nid, field_brand_process_order_value as process_order from node left join field_data_field_brand_process_order on entity_id = nid where node.type = 'site_brand' order by field_brand_process_order_value asc";
+
+	// Create array of matching site brands
+	$site_brands = array();
+	$rows = db_query($query)->fetchAll();
+	$reached_stop_rule = false;
+	foreach ($rows as $row) {
+		$site_brand = node_load($row->nid);
+
+		// Check if brand matches visitor or user criteria
+		if (tm_branding_check_brand($site_brand, $account)) {
+
+			// Add rule if we haven't reached a stop rule
+			if (!($reached_stop_rule)) {
+				$site_brands[] = $site_brand;
+
+				// Check if this brand is a stop rule
+				if (isset($site_brand->field_match_stop_rule[LANGUAGE_NONE][0]['value'])) {
+					if ($site_brand->field_match_stop_rule[LANGUAGE_NONE][0]['value'] == 1) {
+						$reached_stop_rule = true;
+					}
+				}
+			}
+			
+		}
+	}
+
+	// Return array of matching site brands
+	return $site_brands;
+}
+
+/**
+ * Check if brand matches visitor or user criteria
+ * For performance, work from least expensive to most expensive operations.
+ */
+function tm_branding_check_brand($site_brand, $account) {
+
+	global $conf;
+
+	// Step 1. Check if testing is enabled
+	$testing_enabled = false;
+	if (isset($site_brand->field_brand_test_enabled[LANGUAGE_NONE][0]['value'])) {
+		if ($site_brand->field_brand_test_enabled[LANGUAGE_NONE][0]['value']) {
+			$testing_enabled = true;
+		}
+	}
+	if ($testing_enabled) {		
+
+		// Match user
+		if (isset($site_brand->field_brand_test_users[LANGUAGE_NONE])) {
+			if (sizeof($site_brand->field_brand_test_users[LANGUAGE_NONE]) > 0) {
+				foreach($site_brand->field_brand_test_users[LANGUAGE_NONE] as $item) {
+					if ($item['target_id'] == $account->uid) {
+						return true;
+					}
+				}
+			}
+		}
+
+		// Match IP address of visitor
+		if (isset($site_brand->field_brand_test_ips[LANGUAGE_NONE][0]['value'])) {
+			$match_ips = explode(" ", $site_brand->field_brand_test_ips[LANGUAGE_NONE][0]['value']);
+			if ($account->uid > 0) {
+
+				$real_ip = tm_geoip_get_real_visitor_ip();
+				if (array_search($real_ip, $match_ips)) {
+					return true;
+				}
+
+			}
+		}
+	}
+
+	// Step 2. Check if brand is enabled
+	$brand_enabled = false;
+	if (isset($site_brand->field_brand_enabled[LANGUAGE_NONE][0]['value'])) {
+		$brand_enabled = ($site_brand->field_brand_enabled[LANGUAGE_NONE][0]['value'] == '1');
+	}
+	if ($brand_enabled == false) {
+		return false;
+	}
+
+	// Step 3. Check time period
+	if (isset($site_brand->field_brand_enabled_timespan_on[LANGUAGE_NONE][0]['value'])) {
+
+		// Check if time period enabled
+		if ($site_brand->field_brand_enabled_timespan_on[LANGUAGE_NONE][0]['value'] == '1') {
+			$start_datetime = $site_brand->field_brand_enabled_timespan[LANGUAGE_NONE][0]['value'];
+			$end_datetime = $site_brand->field_brand_enabled_timespan[LANGUAGE_NONE][0]['value2'];
+
+			// Compare start and end dates to now, using UTC
+			$start = strtotime($start_datetime);
+			$end = strtotime($end_datetime);
+			$now = strtotime(gmdate("M d Y H:i:s")); // workaround gmdate("U") == date("U")
+ 
+			// Check if time period is valid
+			if (($start > $now) or ($end < $now)) {
+				return false;
+			}
+		}
+	}
+
+	// Step 3. Get match method
+	$match_methods = array();
+	if (isset($site_brand->field_brand_match_method[LANGUAGE_NONE])) {
+		if (sizeof($site_brand->field_brand_match_method[LANGUAGE_NONE]) > 0) {
+			foreach ($site_brand->field_brand_match_method[LANGUAGE_NONE] as $item) {
+				$match_methods[] = $item['value'];
+			}
+		}
+	}
+	if (sizeof($match_methods) == 0) {
+		// no match methods
+		return false;
+	}
+
+	// Get match probability
+	// Any matching criteria should return with this probability.
+	// ie: return (tm_branding_rand(1,100) <= $match_probability);
+	$match_probability = 100;
+	if (in_array("match_probability", $match_methods)) {
+		if (isset($site_brand->field_brand_match_probability[LANGUAGE_NONE][0]['value'])) {
+			$match_probability = $site_brand->field_brand_match_probability[LANGUAGE_NONE][0]['value'];
+		}
+	}
+
+	// Step 4. Match "match_all"
+	// Will match any visitor or member
+	if (in_array("match_all", $match_methods)) {
+		return (tm_branding_rand(1,100) <= $match_probability);
+	}
+
+	// Step 5. Match "anonymous_user"
+	// Must be anonymous visitor to proceeed
+	if (in_array("anonymous_user", $match_methods)) {
+		if ($account->uid > 0) {
+			return false;
+		}
+	}
+
+	// Step 6. Match URL path
+	if (in_array("match_url_path", $match_methods)) {
+
+		if (isset($site_brand->field_match_url_path[LANGUAGE_NONE][0]['value'])) {
+
+			// get list of urls to match
+			// ie: mycompany,user23
+			$parts = explode(",", $site_brand->field_match_url_path[LANGUAGE_NONE][0]['value']);
+			$match_urls = array();
+			$wildcard_urls = array();
+			foreach($parts as $part) {
+				// remove leading / and trim
+				$url = trim(ltrim(strtolower($part), '/'));
+
+				if ($url != "") {
+					if (strpos($url, "*") !== false) {
+						// ie: /chapters/*
+						$wildcard_urls[] = $url;
+					} else {
+						// ie: /community
+						$match_urls[] = $url;
+					}
+				}
+			}
+
+			// check if url path matches
+			$request_path = strtolower(request_path());
+			if (in_array($request_path, $match_urls)) {
+				return (tm_branding_rand(1,100) <= $match_probability);
+			}
+
+			// check if wildcard path matches
+			foreach($wildcard_urls as $wildcard_url) {
+				$wildcard_match = rtrim($wildcard_url, "*"); // remove wildcard
+				if ((strpos($request_path, $wildcard_match)) === 0) {
+					return (tm_branding_rand(1,100) <= $match_probability);
+				}
+			}
+			
+		}
+	}
+
+	// Step 7. Match brand partner cookie
+	if (in_array("match_partner_cookie", $match_methods)) {
+
+		if (isset($_COOKIE['Drupal_visitor_site_branding_partner'])) {
+
+			// Check if partner cookie has expired
+			$partner_expired = tm_branding_check_timestamp_expired($site_brand, "Drupal_visitor_site_branding_partner_timestamp");
+
+			// Get partner codes
+			if (!$partner_expired and isset($site_brand->field_match_partner_cookie[LANGUAGE_NONE][0]['value'])) {
+
+				// get list of partners to match
+				// ie: mybrand,myotherbrand
+				$parts = explode(",", $site_brand->field_match_partner_cookie[LANGUAGE_NONE][0]['value']);
+				$match_partners = array();
+				foreach($parts as $part) {
+					$match_partners[] = trim(strtolower($part));
+				}
+
+				// check if partner code matches
+				if (in_array(strtolower($_COOKIE['Drupal_visitor_site_branding_partner']), $match_partners)) {
+					return (tm_branding_rand(1,100) <= $match_probability);
+				}
+			}
+		}
+	}
+
+	// Step 8. Match referrer domain
+	if (in_array("match_referer_domain", $match_methods)) {
+
+		$referer_domain = "";
+		$referer_expired = true;
+
+		// check cookie value
+		if (isset($_COOKIE['Drupal_visitor_site_branding_referer_domain'])) {
+			$referer_domain = $_COOKIE['Drupal_visitor_site_branding_referer_domain'];
+
+			// Check if referer cookie has expired
+			$referer_expired = tm_branding_check_timestamp_expired($site_brand, "Drupal_visitor_site_branding_referer_domain_timestamp");
+		}
+
+		// check HTTP_REFERER in case cookie has been set in this page load
+		if (isset($_SERVER['HTTP_REFERER'])) {
+
+			if ($_SERVER['HTTP_REFERER'] != "") {
+				try {
+					$referer_domain = parse_url($_SERVER['HTTP_REFERER'], PHP_URL_HOST);
+					$referer_domain = trim(str_replace("www.", "", $referer_domain)); // remove www
+					
+				} catch (Exception $e) {
+					// continue
+				}
+
+				$referer_expired = false;
+			}
+		}
+
+		if (!$referer_expired and $referer_domain != "") {
+
+			// Get partner codes
+			if (isset($site_brand->field_match_referer_domain[LANGUAGE_NONE][0]['value'])) {
+
+				// get list of domains to match
+				// ie: massiveplatform.com
+				$parts = explode(",", $site_brand->field_match_referer_domain[LANGUAGE_NONE][0]['value']);
+				$match_domains = array();
+				foreach($parts as $part) {
+					$match_domains[] = trim(strtolower($part));
+				}
+
+				// check if referrer domain matches
+				if (in_array(strtolower($referer_domain), $match_domains)) {
+					return (tm_branding_rand(1,100) <= $match_probability);
+				}
+			}
+		}
+	}
+
+	// Step 9. Match "match_user_non_subscribed"
+	// Will match a user who is not subscribed
+	// Excludes chapter leaders and moderators
+	// Need to set $conf["tm_branding_user_subscription_enabled_fid"]
+	if (in_array("match_user_non_subscribed", $match_methods)) {
+
+		// Must have account
+		if ($account->uid > 0) {
+
+			// Exclude chapter leaders and moderators
+			if (!(in_array("chapter leader", $account->roles) or (in_array("moderator", $account->roles)))) {
+
+				// require fid lookup of user_subscription_enable
+				if (isset($conf["tm_branding_user_subscription_enabled_fid"])) {
+					
+					// flag id
+					$user_subscription_enabled_fid = $conf["tm_branding_user_subscription_enabled_fid"];
+			
+					// check if member is flagged
+					$query = "SELECT COUNT(flagging_id) AS amount FROM {flagging} f WHERE f.fid = :fid AND entity_id = :uid";
+					$query_fetched = db_query($query, array(':fid' => $user_subscription_enabled_fid, ':uid' => $account->uid))->fetch();
+					$is_subscribed = ($query_fetched->amount > 0);
+									
+					// is not subscribed
+					if (!$is_subscribed) {
+						return (tm_branding_rand(1,100) <= $match_probability);
+					}
+
+				}
+			}
+		}
+	}
+
+	// Step 10. Match "geoip"
+	if (in_array("geoip", $match_methods)) {
+
+		if (module_exists("tm_geoip")) {
+
+			$match_ip = tm_geoip_get_real_visitor_ip();
+
+			// if no ip, lookup from user's last ip
+			if ($match_ip == null) {
+				if ($account->uid > 0) {
+					$match_ip = tm_geoip_get_users_last_ip($account->uid);
+				}
+			}
+
+			// if no ip, break
+			if ($match_ip == null) {
+				$match_ip = "127.0.0.1"; // break; php 7
+			}
+
+			// lookup geoip info
+			$geoip_info = tm_geoip_lookup($match_ip);
+
+			// get geoip info
+			$geoip_continent = null;
+			$geoip_country = null;
+			$geoip_latitude = null;
+			$geoip_longitude = null;
+
+			if (isset($geoip_info['continent']['code'])) {
+				$geoip_continent = $geoip_info['continent']['code'];
+			}
+
+			if (isset($geoip_info['country']['iso_code'])) {
+				$geoip_country = $geoip_info['country']['iso_code'];
+			}
+
+			if (isset($geoip_info['location']['latitude'])) {
+				$geoip_latitude = $geoip_info['location']['latitude'];
+			}
+
+			if (isset($geoip_info['location']['latitude'])) {
+				$geoip_longitude = $geoip_info['location']['longitude'];
+			}
+
+			// check ip continent
+			if ($geoip_continent != null) {
+				if (isset($site_brand->field_brand_match_continent[LANGUAGE_NONE])) {
+					if (sizeof($site_brand->field_brand_match_continent[LANGUAGE_NONE]) > 0) {
+						foreach ($site_brand->field_brand_match_continent[LANGUAGE_NONE] as $item) {
+							if ($item['value'] == $geoip_continent) {
+								return (tm_branding_rand(1,100) <= $match_probability);
+							}
+						}
+					}
+				}
+				
+			}
+
+			// check ip country
+			if ($geoip_country != null) {
+				if (isset($site_brand->field_brand_match_country[LANGUAGE_NONE])) {
+					if (sizeof($site_brand->field_brand_match_country[LANGUAGE_NONE]) > 0) {
+						foreach ($site_brand->field_brand_match_country[LANGUAGE_NONE] as $item) {
+							if ($item['iso2'] == $geoip_country) {
+								return (tm_branding_rand(1,100) <= $match_probability);
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	
+
+	// Step 11. Check "user_country"
+	// Match against the user's profile setting
+	if (in_array("user_country", $match_methods)) {
+		if ($account->uid > 0) {
+
+			if (isset($site_brand->field_brand_match_country[LANGUAGE_NONE])) {
+
+				// get user's country
+				$users_country = null;
+				if (isset($account->field_user_country[LANGUAGE_NONE][0]['iso2'])) {
+					$users_country = $account->field_user_country[LANGUAGE_NONE][0]['iso2'];
+				}
+
+				// check list of countries to match
+				if ($users_country != null) {
+					if (sizeof($site_brand->field_brand_match_country[LANGUAGE_NONE]) > 0) {
+						foreach ($site_brand->field_brand_match_country[LANGUAGE_NONE] as $item) {
+							if ($item['iso2'] == $users_country) {
+								return (tm_branding_rand(1,100) <= $match_probability);
+							}
+						}
+					}
+				}	
+			}
+		}
+	}
+
+	// Step 12. Match "user_home_chapter"
+	if (in_array("user_home_chapter", $match_methods)) {
+		if ($account->uid > 0) {
+
+			// get users's home chapter
+			$users_home_chapter = null;
+			if (isset($account->field_home_chapter[LANGUAGE_NONE][0]['target_id'])) {
+				$users_home_chapter = $account->field_home_chapter[LANGUAGE_NONE][0]['target_id'];
+			}
+
+			// get member chapters
+			if ($users_home_chapter != null) {
+				if (isset($site_brand->field_brand_match_user_chapter[LANGUAGE_NONE])) {
+					foreach ($site_brand->field_brand_match_user_chapter[LANGUAGE_NONE] as $item) {
+						if ($item['target_id'] == $users_home_chapter) {
+							return (tm_branding_rand(1,100) <= $match_probability);
+						} 
+					}
+				}
+			}
+		}
+	}
+
+
+	// Step 13. Match "user_in_chapter"
+	if (in_array("user_in_chapter", $match_methods)) {
+		if ($account->uid > 0) {
+
+			// get users chapters
+			$users_chapters = tm_users_get_chapters($account);
+
+			// get member chapters
+			if (sizeof($users_chapters) > 0) {
+				if (isset($site_brand->field_brand_match_user_chapter[LANGUAGE_NONE])) {
+					foreach ($site_brand->field_brand_match_user_chapter[LANGUAGE_NONE] as $item) {
+						if (in_array($item['target_id'], $users_chapters)) {
+							return (tm_branding_rand(1,100) <= $match_probability);
+						} 
+					}
+				}
+			}
+		}
+	}
+
+	// Step 14. Match "user_in_segment"
+	if (in_array("user_in_segment", $match_methods)) {
+		if ($account->uid > 0) {
+
+			$user_tid = null;
+			if (sizeof($account->field_segment) > 0) {
+				$user_tid = $account->field_segment[LANGUAGE_NONE][0]['tid'];
+						
+				// check industry segments
+				if (isset($site_brand->field_brand_match_user_industry[LANGUAGE_NONE])) {
+					foreach ($site_brand->field_brand_match_user_industry[LANGUAGE_NONE] as $item) {
+						if ($item['tid'] == $user_tid) {
+							return (tm_branding_rand(1,100) <= $match_probability);
+						} 
+					}
+				}
+			}
+		}
+	}
+
+	// No match
+	return false;
+}
+
+
+/**
+ * Get a branded element string.
+ * Search matching brands in order of priority.
+ * Returns base element if no branded elements found.
+ */
+function tm_branding_get_element($element_name, $account = null, $no_session_cache = false) {
+
+	global $conf;
+	global $user;
+
+	// Check if branding is enabled
+	if ($conf['tm_branding_enabled'] == false) {
+		return tm_branding_get_base_element($element_name);
+	}
+
+	// Return base branding if on branding admin page
+	if (current_path() == "admin/branding") {
+		return tm_branding_get_base_element($element_name);
+	}
+
+	// Return base branding if editing a brand
+	// ie: /node/13772/edit?destination=admin/branding
+	if (isset($_GET["destination"])) {
+		if ($_GET["destination"] == "admin/branding") {
+			return tm_branding_get_base_element($element_name);
+		}
+	}
+
+	// Get user
+	if ($account == null) {
+		$account = user_load($user->uid);
+	}
+
+	// Set site_brands into static variable so we only look it up once per request
+	$site_brands = &drupal_static("tm_site_brands");
+	if (!isset($site_brands['matching']) or ($no_session_cache)) {
+		$site_brands['matching'] = tm_branding_get_site_brands($account);
+	}
+
+	// Look through all site brands
+	foreach ($site_brands['matching'] as $site_brand) {
+
+		// Fetch element from site brand
+		$element = tm_branding_get_brand_element($site_brand, $element_name);
+
+		if ($element != "") {
+			return $element;
+		}
+	}
+
+	// Not found, return base brand element
+	return tm_branding_get_base_element($element_name);
+}
+
+
+/**
+ * Get a branded element string
+ */
+function tm_branding_get_brand_element($site_brand, $element_name) {
+
+	$element = "";
+
+	// favicon
+	if ($element_name == "favicon") {
+		if (isset($site_brand->field_brand_favicon[LANGUAGE_NONE][0]['uri'])) {
+			$element = file_create_url($site_brand->field_brand_favicon[LANGUAGE_NONE][0]['uri']);
+		}
+		return $element;
+	}
+
+	// header logo
+	if ($element_name == "header_logo") {
+		if (isset($site_brand->field_brand_header_logo[LANGUAGE_NONE][0]['uri'])) {
+			$element = file_create_url($site_brand->field_brand_header_logo[LANGUAGE_NONE][0]['uri']);
+		}
+		return $element;
+	}
+
+	// menu html
+	if ($element_name == "menu_html") {
+		if (isset($site_brand->field_brand_menu_html[LANGUAGE_NONE][0]['value'])) {
+			$element = $site_brand->field_brand_menu_html[LANGUAGE_NONE][0]['value'];
+		}
+	}
+
+	// frontpage image
+	if ($element_name == "frontpage_image") {
+		if (isset($site_brand->field_brand_frontpage_image[LANGUAGE_NONE][0]['uri'])) {
+			$element = file_create_url($site_brand->field_brand_frontpage_image[LANGUAGE_NONE][0]['uri']);
+		}
+		return $element;
+	}
+
+	// frontpage opacity
+	if ($element_name == "frontpage_opacity") {
+		if (isset($site_brand->field_brand_frontpage_opacity[LANGUAGE_NONE][0]['value'])) {
+			$element = $site_brand->field_brand_frontpage_opacity[LANGUAGE_NONE][0]['value'];
+		}
+		return $element;
+	}
+
+	// frontpage video url
+	if ($element_name == "frontpage_video_url") {
+		if (isset($site_brand->field_brand_frontpage_video_url[LANGUAGE_NONE][0]['url'])) {
+			$element = $site_brand->field_brand_frontpage_video_url[LANGUAGE_NONE][0]['url'];
+		}
+		return $element;
+	}
+
+	// frontpage video link
+	if ($element_name == "frontpage_video_link") {
+		if (isset($site_brand->field_brand_frontpage_video_link[LANGUAGE_NONE][0]['url'])) {
+			$element = $site_brand->field_brand_frontpage_video_link[LANGUAGE_NONE][0]['url'];
+		}
+		return $element;
+	}
+
+	// frontpage video text
+	if ($element_name == "frontpage_video_text") {
+		if (isset($site_brand->field_brand_frontpage_video_text[LANGUAGE_NONE][0]['value'])) {
+			$element = $site_brand->field_brand_frontpage_video_text[LANGUAGE_NONE][0]['value'];
+		}
+		return $element;
+	}
+
+	// top block
+	// note: changed use of field_brand_frontpage_block_html to top block
+	if ($element_name == "top_block_html") {
+		if (isset($site_brand->field_brand_frontpage_block_html[LANGUAGE_NONE][0]['value'])) {
+			// exclude /edit pages or paths longer than 2 segments
+			$current_path = current_path();
+			$num_parts = sizeof(explode("/", $current_path));
+			$ignore_url = false;
+
+			// ignore branding on special paths
+			if (strpos($current_path, "user/register") !== false) { $ignore_url = true; }
+			if (strpos($current_path, "user/password") !== false) { $ignore_url = true; }
+			if (strpos($current_path, "/edit") !== false) { $ignore_url = true; }
+
+			if (!$ignore_url and ($num_parts < 3)) {
+				$element = $site_brand->field_brand_frontpage_block_html[LANGUAGE_NONE][0]['value'];
+			}
+		}
+	}
+
+	// footer logo
+	if ($element_name == "footer_logo") {
+		if (isset($site_brand->field_brand_footer_logo[LANGUAGE_NONE][0]['uri'])) {
+			$element = file_create_url($site_brand->field_brand_footer_logo[LANGUAGE_NONE][0]['uri']);
+		}
+		return $element;
+	}
+
+	// footer_html
+	if ($element_name == "footer_html") {
+		if (isset($site_brand->field_brand_footer_html[LANGUAGE_NONE][0]['value'])) {
+			$element = $site_brand->field_brand_footer_html[LANGUAGE_NONE][0]['value'];
+		}
+	}
+
+	// footer_level1_html
+	if ($element_name == "footer_level1_html") {
+		if (isset($site_brand->field_brand_footer_level1_html[LANGUAGE_NONE][0]['value'])) {
+			$element = $site_brand->field_brand_footer_level1_html[LANGUAGE_NONE][0]['value'];
+		}
+	}
+
+	// footer_level2_html
+	if ($element_name == "footer_level2_html") {
+		if (isset($site_brand->field_brand_footer_level2_html[LANGUAGE_NONE][0]['value'])) {
+			$element = $site_brand->field_brand_footer_level2_html[LANGUAGE_NONE][0]['value'];
+		}
+	}
+
+	// include_css
+	if ($element_name == "include_css") {
+		if (isset($site_brand->field_brand_include_css[LANGUAGE_NONE][0]['value'])) {
+			$element = $site_brand->field_brand_include_css[LANGUAGE_NONE][0]['value'];
+		}
+	}
+
+	// include_js
+	if ($element_name == "include_js") {
+		if (isset($site_brand->field_brand_include_js[LANGUAGE_NONE][0]['value'])) {
+			$element = $site_brand->field_brand_include_js[LANGUAGE_NONE][0]['value'];
+		}
+	}
+
+	// search page banner
+	if ($element_name == "search_page_banner") {
+		if (isset($site_brand->field_brand_search_page_banner[LANGUAGE_NONE][0]['uri'])) {
+			$element = file_create_url($site_brand->field_brand_search_page_banner[LANGUAGE_NONE][0]['uri']);
+		}
+		return $element;
+	}
+
+	// seach page link
+	if ($element_name == "search_page_link") {
+		if (isset($site_brand->field_brand_search_page_link[LANGUAGE_NONE][0]['url'])) {
+			$element = $site_brand->field_brand_search_page_link[LANGUAGE_NONE][0]['url'];
+		}
+		return $element;
+	}
+
+	// email_footer_html
+	if ($element_name == "email_footer_html") {
+		if (isset($site_brand->field_brand_email_footer_html[LANGUAGE_NONE][0]['value'])) {
+			$element = $site_brand->field_brand_email_footer_html[LANGUAGE_NONE][0]['value'];
+		}
+	}
+
+	// navbar_html
+	if ($element_name == "navbar_html") {
+		if (isset($site_brand->field_brand_navbar_html[LANGUAGE_NONE][0]['value'])) {
+			$element = $site_brand->field_brand_navbar_html[LANGUAGE_NONE][0]['value'];
+		}
+	}
+
+	// replace vars
+	$element = tm_branding_replace_vars($element);
+
+	return $element;
+}
+
+/**
+ * Get a base brand element string from $conf
+ */
+function tm_branding_get_base_element($element_name, $extra = null) {
+
+	global $conf;
+
+	$element = "";
+
+	// favicon
+	if ($element_name == "favicon") {
+		$element = tm_branding_get_conf("tm_branding_favicon");
+	}
+
+	// apple touch icons
+	if ($element_name == "apple_touch_icon") {
+		$element = tm_branding_get_conf("tm_branding_apple_touch_icon_path") . $extra;
+	}
+
+	// header logo
+	if ($element_name == "header_logo") {
+		$element = tm_branding_get_conf("tm_branding_header_logo");
+	}
+
+	// menu html
+	if ($element_name == "menu_html") {
+		$element = tm_branding_get_conf("tm_branding_menu_html");
+	}
+
+	// frontpage image
+	if ($element_name == "frontpage_image") {
+		$element = tm_branding_get_conf("tm_branding_frontpage_image");
+	}
+
+	// frontpage opacity
+	if ($element_name == "frontpage_opacity") {
+		$element = tm_branding_get_conf("tm_branding_frontpage_opacity");
+		if ($element == "") {
+			return 1; // default
+		}
+	}
+
+	// frontpage video url
+	if ($element_name == "frontpage_video_url") {
+		$element = tm_branding_get_conf("tm_branding_frontpage_video_url");
+	}
+
+	// frontpage video link
+	if ($element_name == "frontpage_video_link") {
+		$element = tm_branding_get_conf("tm_branding_frontpage_video_link");
+	}
+
+	// frontpage video text
+	if ($element_name == "frontpage_video_text") {
+		$element = tm_branding_get_conf("tm_branding_frontpage_video_text");
+	}
+
+	// frontpage block
+	if ($element_name == "top_block_html") {
+		$element = tm_branding_get_conf("tm_branding_top_block_html");
+	}
+
+	// footer logo
+	if ($element_name == "footer_logo") {
+		$element = tm_branding_get_conf("tm_branding_footer_logo");
+	}
+
+	// footer_html
+	if ($element_name == "footer_html") {
+		$element = tm_branding_get_conf("tm_branding_footer_html");
+		$element = str_replace("__FOOTER_LOGO_URL__", tm_branding_get_element("footer_logo"), $element);
+	}
+
+	// footer_level1_html
+	if ($element_name == "footer_level1_html") {
+		$element = tm_branding_get_conf("tm_branding_footer_level1_html");
+	}
+
+	// footer_level2_html
+	if ($element_name == "footer_level2_html") {
+		$element = tm_branding_get_conf("tm_branding_footer_level2_html");
+	}
+
+	// include_css
+	if ($element_name == "include_css") {
+		$element = tm_branding_get_conf("tm_branding_include_css");
+	}
+
+	// include_js
+	if ($element_name == "include_js") {
+		$element = tm_branding_get_conf("tm_branding_include_js");
+	}
+
+	// search page banner
+	if ($element_name == "search_page_banner") {
+		$element = tm_branding_get_conf("tm_branding_search_page_banner");
+	}
+
+	// seach page link
+	if ($element_name == "search_page_link") {
+		$element = tm_branding_get_conf("tm_branding_search_page_link");
+	}
+
+	// email_footer_html
+	if ($element_name == "email_footer_html") {
+		$element = tm_branding_get_conf("tm_branding_email_footer_html");
+	}
+
+	// navbar_html
+	if ($element_name == "navbar_html") {
+		$element = tm_branding_get_conf("tm_branding_navbar_html");
+
+		// show subscription CTA if enabled
+		// otherwise, insert anon template
+		if (user_is_logged_in()) {
+			if (module_exists("tm_subscriptions_user")) {
+				global $user;
+				if (tm_subscriptions_check_show_user_cta($user->uid, $user->uid, false)) {
+					$element = str_replace("__USER_SUBSCRIPTION_CTA__", $conf["tm_branding_navbar_html_show_subscription_cta"], $element);
+				} else {
+					$element = str_replace("__USER_SUBSCRIPTION_CTA__", $conf["tm_branding_navbar_html_hide_subscription_cta"], $element);
+				}
+			}
+		} else {
+			$element = str_replace("__USER_SUBSCRIPTION_CTA__", $conf["tm_branding_navbar_html_anon_user"], $element);
+		}
+		
+	}
+
+	// replace vars
+	$element = tm_branding_replace_vars($element);
+
+	// render footer lists
+	if (($element_name == "footer_html") or ($element_name == "footer_level1_html") or ($element_name == "footer_level2_html")) {
+
+		// render footer for lists
+		if (module_exists("tm_lists")) {
+			if (isset($conf["tm_lists_footer_num_items"])) {
+				$lists_html = tm_lists_render_footer($conf["tm_lists_footer_num_items"]);
+				$element = str_replace("__LISTS_FOOTER_HTML__", $lists_html, $element);
+			}
+		}
+
+		// render footer for user subscriptions
+		if (module_exists("tm_subscriptions_user")) {
+			if (isset($conf["tm_subscriptions_user_subscribers_footer_num_items"])) {
+				$lists_html = tm_subscriptions_user_render_footer($conf["tm_subscriptions_user_subscribers_footer_num_items"]);
+				$element = str_replace("__SUBSCRIPTIONS_FOOTER_HTML__", $lists_html, $element);
+			}
+		}
+
+		// render footer for organization followers
+		if (isset($conf["tm_organizations_footer_num_items"])) {
+			$lists_html = tm_organizations_render_footer($conf["tm_organizations_footer_num_items"]);
+			$element = str_replace("__ORGANIZATIONS_FOOTER_HTML__", $lists_html, $element);
+		}
+
+	}
+
+	return $element;
+}
+
+/**
+ * Helper method to get conf variable
+ * Returns empty string if not set
+ */
+function tm_branding_get_conf($key) {
+	global $conf;
+	if (isset($conf[$key])) {
+		return $conf[$key];
+	}
+	return "";
+}
+
+/**
+ * Helper method to replace element string with variables
+ */
+function tm_branding_replace_vars($element) {
+
+	global $conf;
+	global $user;
+
+	$element = str_replace("__SITE_NAME__", $conf["tm_site_name"], $element);
+	$element = str_replace("__FRONTPAGE_URL__", $conf["tm_branding_frontpage_url"], $element);
+	$element = str_replace("__ASSETS_BASE_PATH__", $conf["tm_branding_assets_base_path"], $element);
+	$element = str_replace("__CURRENT_YEAR__", date("Y"), $element);
+	$element = str_replace("__FOOTER_LOGO_URL__", tm_branding_get_conf("tm_branding_footer_logo"), $element);
+	
+	// lookup and replace stats
+	if (module_exists("tm_api")) {
+
+		// fetch api data
+		$api_data = tm_api_stats_get_data();
+
+		// parse text
+		$element = tm_api_replace_text_fields($api_data, $element);
+	}
+	
+	return $element;
+}
+
+/**
+ * Helper method to determine if timestamp has expired or not
+ */
+function tm_branding_check_timestamp_expired($site_brand, $cookie_key) {
+
+	// Get cookie timeout value
+	$cookie_expiry_days = 0;
+	if (isset($site_brand->field_match_cookie_expiry[LANGUAGE_NONE][0]['value'])) {
+		$cookie_expiry_days = $site_brand->field_match_cookie_expiry[LANGUAGE_NONE][0]['value'];
+	}
+
+	// Check for no expiry
+	if ($cookie_expiry_days == 0) {
+		return false;
+	}
+
+	// Expire if no timestamp provided
+	if (!isset($_COOKIE[$cookie_key])) {
+		return true;
+	}
+
+	// Get timestamp
+	$timestamp = intval($_COOKIE[$cookie_key]);
+
+	// Expiry
+	if ($cookie_expiry_days != 0) {
+		$now = new DateTime(null, new DateTimeZone('UTC'));
+		if ($timestamp < ($now->getTimestamp() - ($cookie_expiry_days * 60 * 60 * 24))) {
+			return true;
+		}
+	}
+
+	// Still valid
+	return false;
+}
+
+/**
+ * Helper method to return random number
+ */
+function tm_branding_rand($min, $max) {
+	return mt_rand($min,$max);
+}

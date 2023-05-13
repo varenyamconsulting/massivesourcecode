@@ -1,0 +1,185 @@
+<?php
+
+// This module provides geoip lookup using the maxmind GeoIP2 database
+// http://dev.maxmind.com/geoip/
+
+// Installation:
+// Download maxmind database and install to path accessible by server.
+// Set path to $conf['tm_geoip_maxmind_db']
+// Check /admin/geoip_info to verify installation
+
+// Lite database
+// You can download a lite database for free here:
+// https://dev.maxmind.com/geoip/geoip2/geolite2/
+// (Please refer to license for use)
+
+// For production environments, install the php extension for faster lookups
+// Instructions for ubuntu:
+// https://tuxinthefastlane.wordpress.com/2015/04/24/getting-maxminds-geoip2-to-work-with-nginx-and-php-on-ubuntu/
+
+// if maxminddb php extension is not enabled, load library
+if (!extension_loaded("maxminddb")) {
+	include_once 'includes/geoip2.phar';
+}
+use MaxMind\Db\Reader;
+
+/**
+ * Implements hook_menu()
+ */
+function tm_geoip_menu() {
+  $items['admin/geoip_info'] = array(
+    'title' => 'Geoip info',
+    'page callback' => 'tm_geoip_info',
+    'access callback' => 'tm_geoip_info_check',
+    'type' => MENU_CALLBACK
+  );
+  return $items;
+}
+
+/**
+ * Test your ip
+ */
+function tm_geoip_info() {
+
+	global $conf;
+
+	header('Content-Type: text/html; charset=utf-8');
+
+	print "<h1>Geoip info</h1>";
+	print "Use ?ip= to test another ip.<br>";
+	
+	$ip = tm_geoip_get_real_visitor_ip();
+	if (isset($_GET["ip"])) {
+		$ip = $_GET["ip"];
+	}
+	print "ip: " . $ip;
+	$test_your_ip = tm_geoip_lookup($ip);
+
+	if ($test_your_ip == null) {
+		print "<br>No match found (local ip?)";
+	} else {
+		print "<br><br>Location<br>";
+
+		// if tm_status_updates_google_maps_api_key is set, embed a google map
+		$embed_map_html = "";
+		if (isset($conf["tm_status_updates_google_maps_api_key"])) {
+			$google_maps_api_key = $conf["tm_status_updates_google_maps_api_key"];
+			$embed_map_html = '<iframe width="600" height="450" frameborder="0" style="border:0" src="https://www.google.com/maps/embed/v1/place?key=' . $google_maps_api_key . '&q=' . $test_your_ip["location"]["latitude"] . ',' . $test_your_ip["location"]["longitude"] . '&zoom=6" allowfullscreen></iframe><br>';
+		}
+		print $embed_map_html;
+
+		print "<br>Geoip info:";
+		print "<pre>";
+		print_r($test_your_ip);
+		print "</pre>";
+	}
+
+}
+
+/**
+ * Test your ip access callback
+ */
+function tm_geoip_info_check() {
+
+	global $user;
+
+	if ((in_array("administrator", $user->roles)) or (in_array("moderator", $user->roles))) {
+		return true;
+	}
+
+	// not allowed
+	return false;
+}
+
+/**
+ * Lookup details from an ip address
+ */
+function tm_geoip_lookup($ip) {
+
+	global $conf;
+
+	// don't look up empty addresses
+	if ($ip == "") {
+		return null;
+	}
+
+	// test fake ip if tm_geoip_fake_ip set
+	if (isset($conf['tm_geoip_fake_ip'])) {
+		if ($conf['tm_geoip_fake_ip'] != '') {
+			$ip = $conf['tm_geoip_fake_ip'];
+		}
+	}
+
+	// lookup ip address
+	try {
+		$maxmind_db_file = $conf['tm_geoip_maxmind_db'];
+		$reader = new Reader($maxmind_db_file);
+		$ip_lookup = $reader->get($ip);
+		return $ip_lookup;
+	} catch (Exception $e) {
+		return null;
+	}
+	
+}
+
+/**
+ * Get users's last known ip address
+ * Stored by ip module
+ */
+function tm_geoip_get_users_last_ip($uid) {
+
+	$query = "SELECT ip FROM ip_tracker WHERE uid = :uid ORDER BY last_visit DESC LIMIT 1";
+	$row = db_query($query, array(':uid' => $uid))->fetch();
+
+	// get result
+	$ip = null;
+	if ($row != null) {
+		$ip = $row->ip;
+	}
+
+	return tm_geoip_get_ip_from_int($ip);
+}
+
+/**
+ * Helper method get IP from ip_number
+ * from: http://www.brandonchecketts.com/archives/php-conversion-between-and-ip-address-and-an-integer
+ */
+function tm_geoip_get_ip_from_int($ip_number)
+{
+    if(! is_numeric($ip_number)) {
+        return $ip_number;
+    }
+    ## PHP doesn't support unsigned int's, so we'll use a double
+    $ip_number = doubleval($ip_number);
+    $octet1 = $ip_number >> 24 & 255;
+    $octet2 = $ip_number >> 16 & 255;
+    $octet3 = $ip_number >> 8 & 255;
+    $octet4 = $ip_number & 255;
+    $ip_address = $octet1 .'.'. $octet2 .'.'. $octet3 .'.'. $octet4 ;
+    return $ip_address;
+}
+
+/**
+ * Get the real IP address of a visitor
+ * Wrap around ip_address()
+ */
+function tm_geoip_get_real_visitor_ip() {
+  return ip_address();
+}
+
+/**
+ * Get users's last visit time ferom the ip_tracker module
+ */
+function tm_geoip_get_users_last_visit_time($uid) {
+
+	$query = "SELECT GREATEST(first_visit,last_visit) as last_visit FROM ip_tracker WHERE uid = :uid ORDER BY last_visit DESC LIMIT 1";
+	$row = db_query($query, array(':uid' => $uid))->fetch();
+
+	// get result
+	$last_visit = null;
+	if ($row != null) {
+		$last_visit = $row->last_visit;
+	}
+
+	return $last_visit;
+}

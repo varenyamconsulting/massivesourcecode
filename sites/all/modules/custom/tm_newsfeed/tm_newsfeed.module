@@ -1,0 +1,40 @@
+<?php
+/**
+ * @file
+ * Code for the tm_newsfeed feature.
+ *
+ * Installation:
+ * To schedule notifications you must run the following command daily:
+ * drush newsfeed-schedule-deliveries (--test-mode=true)
+ *
+ * Drush tests/helpers
+ * drush newsfeed-test --member-email=user@example --date-range=weekly (or daily)
+ * drush newsfeed-test --member-email=user@example --date-range=custom --date-start=2016-01-01 --date-end=2016-06-01
+ * drush newsfeed-test-worker --member-email=user@example --type=weekly (or daily)
+ * drush newsfeed-clear-schedule (to clear db schedule)
+ */
+
+include "tm_newsfeed.class.inc";
+include "tm_newsfeed.email.inc";
+include "tm_newsfeed.builder.inc";
+include "tm_newsfeed.marketplace.inc";
+include "tm_newsfeed.blog.inc";
+include "tm_newsfeed.discourse.inc";
+include "tm_newsfeed.discourse_frontpage.inc";
+include "tm_newsfeed.preview.inc";
+
+/*
+* Implements hook_menu()
+*/
+function tm_newsfeed_menu() {
+
+  $items['admin/newsfeed/notification_preview'] = array(
+    'title' => 'Notification Email Test',
+    'page callback' => 'tm_newsfeed_admin_notification_preview',
+    'page arguments' => array(2),
+    'access callback' => 'tm_newsfeed_admin_notification_preview_callback',
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}

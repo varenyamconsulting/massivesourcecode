@@ -1,0 +1,128 @@
+<?php
+/**
+ * @file
+ * Code for the TM Intercom Feature
+ */
+
+/**
+ * Implement hook_page_alter()
+ * Add intercom javascript variables for logged in users
+ * See: https://developers.intercom.com/installing-intercom/docs/javascript-api-attributes-objects
+ */
+function tm_intercom_page_alter(&$page) {
+
+	if (user_is_logged_in()) {
+		
+		global $conf;
+		global $user;
+
+		// load user
+		$account = user_load($user->uid);
+
+		// create settings
+		$settings = array();
+		$settings['app_id'] = $conf['tm_intercom_app_id'];
+		$settings['user_id'] = $account->uid;
+		$settings['email'] = $account->mail;
+		$settings['created_at'] = $account->created;
+
+		// avatar
+		$avatar_uri = _tm_users_get_avatar_uri($account);
+		$image_url = image_style_url("avatar", $avatar_uri);
+		$settings['avatar'] = array('type' => 'avatar', 'image_url' => $image_url);
+
+		// name
+		$full_name = "User";
+		if (isset($account->field_user_first_name[LANGUAGE_NONE][0]['value'])) {
+			$full_name = strip_tags($account->field_user_first_name[LANGUAGE_NONE][0]['value']);
+		}
+		if (isset($account->field_user_last_name[LANGUAGE_NONE][0]['value'])) {
+			$full_name .= " " . strip_tags($account->field_user_last_name[LANGUAGE_NONE][0]['value']);
+		}
+		$settings['name'] = $full_name;
+
+		// unsubscribed_from_emails
+		$notif = new TMNotification("global_newsletter");
+		$settings['unsubscribed_from_emails'] = !$notif->isEnabled($account->uid);
+
+		// custom variables
+
+		// profile url
+		$account_profile_url = drupal_get_path_alias("user/" . $account->uid);
+		$settings['tm_profile_url'] = url($account_profile_url,array('absolute'=>true));
+
+		// first company page
+		$settings['tm_company_page'] = null;
+		$organization_profile_nids = tm_organizations_get_users_companies($account->uid);
+		if (sizeof($organization_profile_nids) > 0) {
+			$company_page_url = drupal_get_path_alias("node/" . $organization_profile_nids[0]);
+			$settings['tm_company_page'] = url($company_page_url,array('absolute'=>true));
+		}
+	
+		// guest member or approved
+		$member_type = "Guest Member";
+		if (in_array("approved user", $account->roles)) {
+			$member_type = "Approved Member";
+		}
+		if (in_array("chapter leader", $account->roles)) {
+			$member_type = "Chapter Leader";
+		}
+
+		// user subscription
+		// use flag lookup directly for performance
+		if (module_exists('tm_subscriptions_user')) {
+			$user_subscription_enable_flag = flag_get_flag('user_subscription_enable', NULL);
+			if ($user_subscription_enable_flag->is_flagged($account->uid)) {
+				$member_type = $conf["tm_subscriptions_user_label_noun"];
+			}
+		}
+
+		$settings['tm_member_type'] = $member_type;
+
+		// HMAC using SHA-256
+		$settings['user_hash'] = tm_intercom_hmac($account->uid);
+
+
+		// include js
+		drupal_add_js('window.intercomSettings = ' . json_encode($settings), array(
+			'type' => 'inline',
+			'scope' => 'footer',
+		));
+
+	}
+  
+}
+
+/**
+ * Implement hook_user_logout()
+ */
+function tm_intercom_user_logout($account) {
+
+	global $conf;
+
+	// shutdown intercom 
+	// see: https://developers.intercom.com/installing-intercom/docs/intercom-javascript
+	foreach ($_COOKIE as $cookie_name => $value) {
+		$parts = explode('-', $cookie_name);
+		if ($parts[0] == 'intercom') {
+			unset($_COOKIE[$cookie_name]);
+			setcookie($cookie_name, '', time() - 3600, "/", $conf["tm_intercom_cookie_domain"]);
+		}
+	}
+}
+
+/**
+ * Helper method to generate hmac verification
+ */
+function tm_intercom_hmac($uid) {
+	
+	global $conf;
+
+	$hmac = hash_hmac(
+		'sha256', // hash function
+		$uid, // user's id
+		$conf['tm_intercom_hmac_secret_key'] // secret key (keep safe!)
+		);
+
+	return $hmac;
+}

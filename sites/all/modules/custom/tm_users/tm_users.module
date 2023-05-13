@@ -1,0 +1,927 @@
+<?php
+
+/**
+ * @file
+ * Code for the tm_users feature.
+ */
+
+include_once 'tm_users.features.inc';
+
+include_once 'tm_users.approval.inc';
+include_once 'tm_users.cancel.inc';
+include_once 'tm_users.csv.inc';
+include_once 'tm_users.csv_fb.inc';
+include_once 'tm_users.display.inc';
+include_once 'tm_users.edit.inc';
+include_once 'tm_users.follow.inc';
+include_once 'tm_users.forms.inc';
+include_once 'tm_users.helpers.inc';
+include_once 'tm_users.mail.inc';
+include_once 'tm_users.moderate.inc';
+include_once 'tm_users.register.inc';
+include_once 'tm_users.tips.inc';
+include_once 'tm_users.drush.inc';
+include_once 'tm_users.duplicates.inc';
+
+
+/**
+ * Init tm_users module
+ */
+function tm_users_init() {
+
+  global $conf;
+  global $user;
+
+  // access uid in js with:
+  // var id = Drupal.settings.currentUser;
+  drupal_add_js(array('currentUser' => $user->uid), 'setting');
+
+  // set minimum request approval score
+  $approval_score = 50; // default
+  if (isset($conf["tm_users_request_approval_minimum_score"])) {
+    $approval_score = $conf["tm_users_request_approval_minimum_score"];
+  }
+  drupal_add_js(array('user_approval_request_minimum_score' => $approval_score), 'setting');
+
+  // keep track of signed in users
+  tm_users_track_signed_in();
+
+  // set application cookies
+  tm_users_set_application_cookies();
+
+  // verification message
+  if (!in_array("approved user", $user->roles)) {
+
+    $approval_verifying_message = "Here are some tips to get verified sooner: <br><ul class='tm-checklist'><li>Use your <b>real name</b></li><li>Upload a <b>picture of yourself</b></li><li>Fill out the <b>about me</b> section</li></ul>Our community team will review your profile. To check your verification status, please <a href='/contact'>contact us</a>.";
+    if (isset($conf["tm_users_approval_verifying_message"])) {
+      $approval_verifying_message = $conf["tm_users_approval_verifying_message"];
+    }
+    drupal_add_js(array('tm_users' => array('approval_verifying_message' => $approval_verifying_message)), array('type' => 'setting'));
+  }
+
+}
+
+/*
+* Implements hook_permission()
+*/
+function tm_users_permission() {
+  return array(
+    'approve users' => array(
+      'title' => t('Approve users'),
+      'description' => t('Approve new users on the website.'),
+    ),
+    'unapprove users' => array(
+      'title' => t('Un-approve users'),
+      'description' => t('Remove approval from users on the website.'),
+    ),
+  );
+}
+
+/*
+* Implements hook_menu()
+*/
+function tm_users_menu() {
+  $items['user/%user/approve'] = array(
+    'title' => 'Approve user',
+    'page callback' => 'tm_users_approve',
+    'page arguments' => array(1),
+    'access arguments' => array('approve users'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['user/%user/unapprove'] = array(
+    'title' => 'Un-approve user',
+    'page callback' => 'tm_users_unapprove',
+    'page arguments' => array(1),
+    'access arguments' => array('unapprove users'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['user/%user/approval_need_more_info'] = array(
+    'title' => 'Request more info',
+    'page callback' => 'tm_users_approval_need_more_info',
+    'page arguments' => array(1),
+    'access arguments' => array('approve users'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['user/%user/approval_is_company_or_brand'] = array(
+    'title' => 'Account is company or brand',
+    'page callback' => 'tm_users_approval_is_company_or_brand',
+    'page arguments' => array(1),
+    'access arguments' => array('approve users'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['user/%user/request_approval'] = array(
+    'title' => 'Request approval',
+    'page callback' => 'tm_users_request_approval',
+    'page arguments' => array(1),
+    'access callback' => 'tm_users_check_request_approval',
+    //'access arguments' => array('user_is_logged_in'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['user/%user/moderate_non_community_profile'] = array(
+    'title' => 'Moderate profile',
+    'page callback' => 'tm_users_moderate_non_community_profile',
+    'page arguments' => array(1),
+    'access arguments' => array('approve users'),
+    //'access arguments' => array('user_is_logged_in'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['user/%user/confirm_cancel_account'] = array(
+    'title' => 'Confirm cancel account',
+    'page callback' => 'tm_users_confirm_cancel_account',
+    'page arguments' => array(1),
+    'access callback' => 'tm_users_check_cancel_account',
+    'type' => MENU_CALLBACK,
+  );
+  $items['user/%user/follow'] = array(
+    'title' => 'Follow member',
+    'page callback' => 'tm_users_follow_message',
+    'page arguments' => array(1),
+    'access callback' => 'user_is_logged_in',
+    'type' => MENU_CALLBACK,
+  );
+  $items['user/%user/moderate_report_member'] = array(
+    'title' => 'Report member profile',
+    'page callback' => 'tm_users_moderate_report_member',
+    'page arguments' => array(1),
+    'access callback' => 'tm_users_moderate_report_check',
+    'type' => MENU_CALLBACK,
+  );
+  $items['user/%user/moderate_report_member_resolved'] = array(
+    'title' => 'Report member profile',
+    'page callback' => 'tm_users_moderate_report_member_resolved',
+    'page arguments' => array(1),
+    'access callback' => 'tm_users_moderate_report_resolved_check',
+    'type' => MENU_CALLBACK,
+  );
+  $items['admin/export_global_newsletter'] = array(
+    'title' => 'Download global newsletter subscribers',
+    'page callback' => 'tm_users_download_global_newsletter_csv',
+    'page arguments' => array(1),
+    'access callback' => 'tm_users_download_global_newsletter_csv_check',
+    'type' => MENU_CALLBACK,
+  );
+  $items['admin/export_facebook_customers'] = array(
+    'title' => 'Download Facebook Customer List',
+    'page callback' => 'tm_users_download_facebook_csv',
+    'page arguments' => array(1),
+    'access callback' => 'tm_users_download_facebook_csv_check',
+    'type' => MENU_CALLBACK,
+  );
+  $items['admin/export_chapter_leaders'] = array(
+    'title' => 'Download chapter leaders csv',
+    'page callback' => 'tm_users_download_chapter_leaders_csv',
+    'page arguments' => array(1),
+    'access callback' => 'tm_users_download_chapter_leaders_csv_check',
+    'type' => MENU_CALLBACK,
+  );
+  $items['user/lucky'] = array(
+    'title' => 'I\'m feeling lucky',
+    'page callback' => 'tm_users_redirect_to_random_user',
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['user/redirect_avatar_url'] = array(
+    'title' => 'User avatar',
+    'page callback' => 'tm_users_redirect_avatar_url',
+    'page arguments' => array(2),
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['user/redirect_profile_url'] = array(
+    'title' => 'User profile',
+    'page callback' => 'tm_users_redirect_profile_url',
+    'page arguments' => array(2),
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['user/redirect_to_settings'] = array(
+    'title' => 'User profile',
+    'page callback' => 'tm_users_redirect_edit_settings',
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['user/join'] = array(
+    'title' => 'Join',
+    'page callback' => 'tm_users_redirect_sign_up',
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+  );
+  
+  return $items;
+}
+
+/**
+ * Implements hook_theme()
+ */
+function tm_users_theme() {
+  return array(
+    'account_menu' => array(
+      'template' => 'tm_users_account_menu',
+      'path' => drupal_get_path('module', 'tm_users') . '/templates/'
+    )
+  );
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter()
+ */
+function tm_users_form_user_login_block_alter(&$form, &$form_state) {
+  // Replace labels for placeholder on the input element
+  $form['name']['#attributes'] = array('placeholder' => t('Email'));
+  $form['pass']['#attributes'] = array('placeholder' => t('Password'));
+
+  // Remove links and keep only the one to reset the password.
+  $form['links'] = array();
+  $form['links']['reset_pass'] = array(
+    '#markup' => l(t('Forgot your password?'), 'user/password', array('title' => t('Request new password via email.')))
+  );
+  $form['links']['#weight'] = 100;
+}
+
+/**
+ * Redirect user to their profile page
+ */
+function tm_users_user_profile_form_submit($form, &$form_state) {
+  $user_id = $form['#user']->uid;
+  drupal_goto(drupal_get_path_alias('user/' . $user_id));
+}
+
+/**
+ * Implements template_preprocess_page()
+ */
+function tm_users_preprocess_page(&$variables) {
+
+  // Add account menu to page.
+  $variables['page']['account_menu'] = theme('account_menu');
+
+  // Check for duplicate accounts
+  tm_users_check_duplicate_account();
+
+  // disable personal contact form setting
+  // see: http://stackoverflow.com/questions/2540582/how-do-i-disable-the-personal-contact-form-option-in-the-user-edit-form
+  $menu_items = menu_get_item();
+  if('user/%/edit' === $menu_items['path']){
+       $variables['page']['content']['content']['content']['system_main']['contact']['#access'] = FALSE;
+  }
+
+  // Split url parts
+  $request_path = request_path();
+  $url_parts = explode("/", $request_path);
+
+  // Show chapter page tips
+  if (($url_parts[0] == "chapters") and (sizeof($url_parts) == 1)) {
+    tm_users_chapter_tips();
+  }
+
+  // Show chapter page tips
+  if (($url_parts[0] == "groups") and (sizeof($url_parts) == 1)) {
+    tm_users_groups_tips();
+  }
+
+  // Show chapter page tips
+  if (($url_parts[0] == "chapters") and (sizeof($url_parts) == 2)) {
+    tm_users_in_chapter_tips();
+  }
+
+  // Show chapter page tips
+  // ie /node/12833/members
+  if (isset($url_parts[2])) {
+    if (($url_parts[0] == "node") and ($url_parts[2] == "members") and (sizeof($url_parts) == 3)) {
+      tm_users_in_chapter_tips();
+    }
+  }
+
+  // Show leaders page tips
+  if (($url_parts[0] == "leaders") and (sizeof($url_parts) == 1)) {
+    tm_users_leaders_tips();
+  }
+
+  // Show community page tips
+  if (($url_parts[0] == "community") and (sizeof($url_parts) == 1)) {
+    tm_users_community_tips();
+  }  
+
+  // Show events page tips
+  if (($url_parts[0] == "events") and (sizeof($url_parts) == 1)) {
+    tm_users_event_tips();
+  }
+
+  // Show events page tips
+  if (($url_parts[0] == "sponsors") and (sizeof($url_parts) == 1)) {
+    tm_users_sponsors_tips();
+  }
+
+  // Show search tips
+  if (($url_parts[0] == "search") and (sizeof($url_parts) == 1)) {  
+    // show signup tips if less than < 70% complete
+    //tm_users_signup_tips(false, null, 70);
+    return;
+  }
+
+  // Add event
+  if ($request_path == "events/add") {  
+    return;
+  }
+
+  // Show user signup tips if < 80% complete
+  tm_users_signup_tips(false, null, 80);
+
+}
+
+/**
+ * Hook on creation of a new redirect in redirect module.
+ * This is a sneaky method to delete automatically created user redirects
+ * We preserve the original /community/name URL (for old links in notification emails)
+ */
+function tm_users_redirect_insert($redirect) {
+  //print_r($redirect->source);
+  $parts = explode("/", $redirect->redirect);
+  $source_parts = explode("/", $redirect->source);
+  if (($parts[0] == "user") && ($source_parts[0] != "community")) {
+    redirect_delete_by_path($redirect->source);
+  }
+}
+
+/**
+ * Set title of user profiles questions
+ * Refer to settings.php configuration
+ */
+function tm_users_preprocess_field(&$variables) {
+
+  global $conf;
+
+  // Get element type
+  $element_type = null;
+  if (!isset($variables['element']['#object']->type)) {
+    $element_type = "user";
+  }
+
+  // Only operate on user
+  if ($element_type != "user") {
+    return;
+  }
+
+  if ($variables['element']['#field_name'] == 'field_user_question_1') {
+    $variables['label'] = $conf["tm_field_user_question_1_title"];
+  }
+
+  if ($variables['element']['#field_name'] == 'field_user_question_2') {
+    $variables['label'] = $conf["tm_field_user_question_2_title"];
+  }
+
+  if ($variables['element']['#field_name'] == 'field_user_question_3') {
+    $variables['label'] = $conf["tm_field_user_question_3_title"];
+  }
+
+  if ($variables['element']['#field_name'] == 'field_user_question_4') {
+    $variables['label'] = $conf["tm_field_user_question_4_title"];
+  }
+
+  if ($variables['element']['#field_name'] == 'field_user_question_5') {
+    $variables['label'] = $conf["tm_field_user_question_5_title"];
+  }
+
+  // Replace default avatar image
+  if ($variables['element']['#field_name'] == 'field_avatar') {
+    $variables['items'][0]['#item']['uri'] = _tm_users_get_default_avatar($variables['items'][0]['#item']['uri'], $variables['element']['#object']->uid);
+  }
+
+  // Replace default cover image
+  if ($variables['element']['#field_name'] == 'field_image') {
+    $variables['items'][0]['#item']['uri'] = _tm_users_get_default_image($variables['items'][0]['#item']['uri'], $variables['element']['#object']->uid);
+  }
+
+}
+
+/**
+ * Presave user
+ */
+function tm_users_user_presave(&$edit, $account, $category) {
+
+  global $user;
+
+  // Don't act on new users without a uid yet
+  if (!isset($account->uid)) {
+    return;
+  }
+
+  // Don't modify administrators' forms
+  if (in_array('administrator', $account->roles)) {
+    return;
+  }
+
+  // Check that moderator can edit account
+  if (!tm_users_check_moderator_edit_permission($user, $account)) {
+    // allow password resets
+    if (($user->uid != 0) and ($category == "account")) {
+      drupal_set_message("Sorry, you can't modify a moderator account.", "warning");
+      drupal_goto("user/" . $account->uid);
+      return;
+    }
+  }
+
+  // Preserve approved status if editing own account
+  // If user signs up, and in middle of editing profile is approved, then
+  // saving their profile would overwrite the approved role (making them unapproved).
+  // This method fixes this edge case
+  if ($account->uid == $user->uid) {
+    if (in_array("approved user", $account->original->roles) 
+      and !in_array("approved user", $account->roles)) {
+      $role = user_role_load_by_name("approved user");
+      $edit['roles'][$role->rid] = "approved user";
+    }
+  }
+
+  // Trim all URL fields
+  // Otherwise a blank space causes the link to be rendered blank
+  $field_names = array("field_link_website", "field_link_twitter", "field_link_linkedin", "field_link_facebook", "field_link_instagram", "field_link_youtube", "field_link_vimeo", "field_link_snapchat");
+  foreach ($field_names as $field_name) {
+     if (isset($edit[$field_name][LANGUAGE_NONE][0]['url'])) {
+      if (trim($edit[$field_name][LANGUAGE_NONE][0]['url']) == "") {
+        $edit[$field_name][LANGUAGE_NONE] = array();
+      }
+    }
+  }
+
+  // Trim about field
+  // Remove it if it's empty (stop user from entering a space)
+  if (isset($edit['field_about_me'][LANGUAGE_NONE][0]['value'])) {
+    $trimmed = trim($edit['field_about_me'][LANGUAGE_NONE][0]['value']);
+    // save trimmed value
+    $edit['field_about_me'][LANGUAGE_NONE][0]['value'] = $trimmed;
+  }
+
+  // Trim user cover video field
+  if (isset($edit['field_user_cover_video'][LANGUAGE_NONE][0]['value'])) {
+    $trimmed = trim($edit['field_user_cover_video'][LANGUAGE_NONE][0]['value']);
+    // save trimmed value
+    $edit['field_user_cover_video'][LANGUAGE_NONE][0]['value'] = $trimmed;
+  }
+
+  // Trim first_name, last_name, job role, organization name, city
+  // Otherwise a blank space causes the link to be rendered blank
+  $field_names = array("field_user_first_name", "field_user_last_name", "field_job_role", "field_job_organization", "field_location_city");
+  foreach ($field_names as $field_name) {
+    if (isset($edit[$field_name][LANGUAGE_NONE][0]['value'])) {
+      $trimmed = trim($edit[$field_name][LANGUAGE_NONE][0]['value']);
+      $edit[$field_name][LANGUAGE_NONE][0]['value'] = $trimmed;
+    }
+  }
+ 
+  // Store reason for joining
+  if (isset($edit['reason_for_joining'])) {
+    $edit['field_reason_for_joining'][LANGUAGE_NONE][0]['value'] = trim($edit['reason_for_joining']);
+  }
+
+  // Filter friendly URL
+  if (isset($edit['field_friendly_url'][LANGUAGE_NONE][0]['value'])) {
+
+    // split a full url
+    // ie: https://example.massiveplatform.com/my-account -> "my-account"
+    $parts = explode("/", $edit['field_friendly_url'][LANGUAGE_NONE][0]['value']);
+    $last_part = $parts[sizeof($parts) - 1]; // get last component
+
+    // filter it with ^[_\-\sa-zA-Z0-9]+$
+    $last_part = str_replace(' ', '-', $last_part); // Replaces all spaces with hyphens.
+    //$last_part = preg_replace('/[_\-\sa-zA-Z0-9]/', '', $last_part); // Removes special chars.
+    $last_part = preg_replace('/[^A-Za-z0-9\-_]/', '', $last_part); // Removes special chars.
+
+    // Replaces multiple hyphens with single one
+    // We allow multiple _ to support twitter usernames
+    if ($last_part != null) {
+      $last_part = preg_replace('/-+/', '-', $last_part); 
+    }
+
+    if ($last_part != "") {
+      $edit['field_friendly_url'][LANGUAGE_NONE][0]['value'] = $last_part;
+    } else {
+      $edit['field_friendly_url'][LANGUAGE_NONE] = "";
+    }
+
+  }
+
+  // Trim testimonial
+  if (isset($edit['field_user_testimonial'][LANGUAGE_NONE][0]['value'])) {
+    $trimmed = trim($edit['field_user_testimonial'][LANGUAGE_NONE][0]['value']);
+    if ($trimmed != "") {
+      // save trimmed value
+      $edit['field_user_testimonial'][LANGUAGE_NONE][0]['value'] = $trimmed;
+    } else {
+      // remove empty value
+      $edit['field_user_testimonial'] = null;
+    }
+  }
+
+  // Trim COVID-19 Response
+  if (isset($edit['field_user_covid19_message'][LANGUAGE_NONE][0]['value'])) {
+    $trimmed = trim($edit['field_user_covid19_message'][LANGUAGE_NONE][0]['value']);
+    if (in_array($trimmed, array("n/a", "N/A", "-", "--"))) {
+      $trimmed = "";
+    }
+    if ($trimmed != "") {
+      // save trimmed value
+      $edit['field_user_covid19_message'][LANGUAGE_NONE][0]['value'] = $trimmed;
+    } else {
+      // remove empty value
+      $edit['field_user_covid19_message'] = null;
+    }
+  }
+
+  // Set last modified timestamp of user
+  $datetime_now = new DateTime(null, new DateTimeZone('UTC'));
+  $edit['field_last_modified_timestamp'][LANGUAGE_NONE][0]['value'] = $datetime_now->getTimestamp();
+
+}
+
+/** 
+ * Add a link to chapter leaders from the community page
+ */
+function tm_users_views_post_execute(&$view) {
+
+  if ($view->name == 'community') {
+
+    global $conf;
+    global $user;
+
+    // show toggle all members link if only displaying approved members
+    // restrict to chapter leaders, moderators
+    $toggle_all_members_link = "";
+
+    if (isset($conf["tm_community_show_unapproved_users"])) {
+      if ($conf["tm_community_show_unapproved_users"] == false) {
+
+        if ((in_array('administrator', $user->roles)) or in_array('chapter leader', $user->roles) or in_array('moderator', $user->roles)) {
+
+          if (isset($_GET["show_all_members"])) {
+            $toggle_all_members_link = "<div><a style='margin-left: 0.5rem;' class='bttn bttn-tertiary bttn-m' href='/community'>Hide Guest Members</a></div>";
+          } else {
+            $toggle_all_members_link = "<div><a class='bttn bttn-tertiary bttn-m' href='/community?show_all_members'>Show Guest Members</a></div>";
+          }
+        }
+      }
+    }
+
+    $view->build_info['title'] = "Community &middot; <a href='/leaders'>Chapter Leaders</a>" . $toggle_all_members_link;
+  }
+
+  if ($view->name == 'chapter_leaders') {
+    $view->build_info['title'] = "<a href='/community'>Community</a> &middot; Chapter Leaders";
+  }
+
+}
+
+/** 
+ * Implement hook_views_query_alter()
+ * Filter community pages
+ */
+function tm_users_views_query_alter(&$view, &$query) {
+
+  if ($view->name == 'community') {
+
+    global $conf;
+
+    // 1. Filter user roles
+    // INNER JOIN {users_roles} users_roles ON users.uid = users_roles.uid
+    // ... AND (users_roles.rid = '6') ))
+    $tm_community_show_unapproved_users = false;
+    if (isset($conf["tm_community_show_unapproved_users"])) {
+      $tm_community_show_unapproved_users = $conf["tm_community_show_unapproved_users"];
+    }
+
+    // allow chapter leaders, moderator to override and show all members
+    if (isset($_GET["show_all_members"])) {
+
+      global $user;
+      if ((in_array('administrator', $user->roles)) or in_array('chapter leader', $user->roles) or in_array('moderator', $user->roles)) {
+        $tm_community_show_unapproved_users = true;
+      }
+
+    }
+
+    if (!$tm_community_show_unapproved_users) {
+
+      // Add filter for approved users only
+      $role = user_role_load_by_name('approved user');
+      $join = new views_join;
+      $join->construct('users_roles', 'users', 'uid', 'uid', array(), 'INNER');
+      $query->add_relationship('users_roles', $join, 'users');
+      $query->add_where(0, "users_roles.rid", $role->rid, "=");
+
+    }
+
+
+    // 2. Filter community by chapter or by country
+    $tm_chapters_community_search_filter = "country";
+    if (isset($conf["tm_community_search_filter"])) {
+      $tm_chapters_community_search_filter = $conf["tm_community_search_filter"];
+    }
+
+    // Filter by chapter
+    if ($tm_chapters_community_search_filter == "chapter") {
+
+      // Chapter filter provided
+      if (isset($_GET["name_list"])) {
+        
+        // Filter results by chapter
+        if (($tm_chapters_community_search_filter == "chapter") and ($_GET["name_list"] != "All")) {
+
+          // remove the country query
+          unset($query->where[1]['conditions'][1]);
+          unset($query->tables['users']['field_data_field_user_country']);
+          unset($query->tables['users']['countries_country_field_data_field_user_country']);
+          unset($query->relationships['countries_country_field_data_field_user_country']);
+          unset($query->table_queue['field_data_field_user_country']);
+          unset($query->table_queue['countries_country_field_data_field_user_country']);
+
+          // update the query
+          $chapter_nid = $_GET["name_list"];
+          $signup_flag = flag_get_flag("signup");
+          $join = new views_join;
+          $join->construct('flagging', 'flagging', 'users.uid', 'uid', array(), 'LEFT');     
+          $query->add_relationship('f', $join, 'users');
+          $query->add_where(0, "f.fid", $signup_flag->fid, "=");
+          $query->add_where(0, "f.entity_id", $chapter_nid, "=");
+
+        }
+      }
+        
+    }
+
+    
+  }
+}
+
+/**
+ * Keep track of already signed in users
+ * Updates ip_tracker record
+ */
+function tm_users_track_signed_in() {
+
+  global $user;
+
+  // must be logged in
+  if (!user_is_logged_in()) {
+    return;
+  }
+
+  // if no cookie set
+  if (!isset($_COOKIE['Drupal_visitor_tm_is_signed_in'])) {
+    
+    // set cookie for a day
+    setrawcookie('Drupal.visitor.tm_is_signed_in', rawurlencode(true), REQUEST_TIME + 86400, '/');
+
+    // track ip
+    ip_tracker_user_save($user->uid);
+
+  }
+}
+
+/**
+ * Track some additional user information in a cookie for use by other applications on the domain
+ * ie: blog, forum. etc.
+ */
+function tm_users_set_application_cookies() {
+
+  // Don't set any cookies if logged out
+  // Otherwise we will not be able to cache responses
+  if (!user_is_logged_in()) {
+    return;
+  }
+
+  global $user;
+  global $conf;
+
+  // load user
+  $loaded = user_load($user->uid);
+
+  // anonymous_visitor
+  user_cookie_save(array('anonymous_visitor' => 0));
+
+  // approved_member
+  if (in_array("approved user", $user->roles)) {
+    user_cookie_save(array('approved_member' => 1));
+  } else {
+    user_cookie_save(array('approved_member' => 0));
+  }
+
+  // user_profile_uri
+  $user_profile_uri = url('user/' . $loaded->uid);
+  user_cookie_save(array('user_profile_uri' => $user_profile_uri));
+
+  // user_avatar_uri
+  if (empty($loaded->field_avatar)) {
+    $img_uri = $conf["tm_images_default_field_avatar"];
+  }  else {
+    $img_uri = $loaded->field_avatar[LANGUAGE_NONE][0]['uri'];
+  }
+
+  // If image is default, replace with random image from folder
+  if (isset($conf["tm_images_default_path"])) {
+    if ($img_uri == $conf["tm_images_default_field_avatar"]) {
+      $image_id = $loaded->uid;
+      $cover_files = $conf["tm_images_default_avatar"];
+      $image_index = $image_id % sizeof($cover_files);
+      $img_uri = $conf["tm_images_default_path"] . $cover_files[$image_index];
+    }
+  }
+  user_cookie_save(array('user_avatar_uri' => image_style_url("avatar", $img_uri)));
+
+  // User ID
+  user_cookie_save(array('user_id' => $user->uid));
+
+  // User full name
+  $full_name = "User";
+  if (isset($loaded->field_user_first_name[LANGUAGE_NONE][0]['value'])) {
+    $full_name = strip_tags($loaded->field_user_first_name[LANGUAGE_NONE][0]['value']);
+  }
+  if (isset($loaded->field_user_last_name[LANGUAGE_NONE][0]['value'])) {
+    $full_name .= " " . strip_tags($loaded->field_user_last_name[LANGUAGE_NONE][0]['value']);
+  }
+  user_cookie_save(array('user_full_name' => $full_name));
+
+  // Hmac verification (for tm_intercom module)
+  if (module_exists("tm_intercom")) {
+    user_cookie_save(array('intercom_hash' => tm_intercom_hmac($user->uid)));
+  }
+  
+}
+
+/**
+ * Unset cookies set in tm_users_init() when user logs out
+ */
+function tm_users_user_logout($account) {
+
+  $unset_cookies = array("Drupal.visitor.anonymous_visitor", "Drupal.visitor.approved_member", "Drupal.visitor.user_profile_uri", "Drupal.visitor.user_avatar_uri", "Drupal.visitor.user_id", "Drupal.visitor.user_full_name", "Drupal.visitor.intercom_hash");
+  foreach ($unset_cookies as $cookie_name) {
+    unset($_COOKIE[str_replace(".", "_", $cookie_name)]);
+    setcookie($cookie_name, '', time() - 3600, "/");
+  }  
+}
+
+/**
+ * Hook for google_tag manager
+ * Allow member with privacy setting to disable analytics
+ */
+function tm_users_google_tag_insert_alter(&$satisfied) {
+
+  global $user;
+
+  // acknowledge HTTP_DNT
+  // https://en.wikipedia.org/wiki/Do_Not_Track
+  if (isset($_SERVER['HTTP_DNT'])) {
+    if ($_SERVER['HTTP_DNT'] == 1) {
+      $satisfied = false; 
+      return;
+    }
+  }
+
+  // static value set by tm_lists
+  $tm_google_tag_disabled = &drupal_static("tm_google_tag_disabled");
+  if ($tm_google_tag_disabled) {
+     $satisfied = false;
+  }
+
+  // todo: acknowledge a no_analytics cookie for logged out users
+  if (!user_is_logged_in()) {
+    return;
+  }
+
+  $account = user_load($user->uid);
+
+  // if user has opted out of analytics, turn it off
+  if (isset($account->field_user_disable_analytics[LANGUAGE_NONE][0]['value'])) {
+    if ($account->field_user_disable_analytics[LANGUAGE_NONE][0]['value'] == 1) {
+      $satisfied = false;
+    }
+  }
+}
+
+/**
+ * Redirect to a random user account
+ */
+function tm_users_redirect_to_random_user($count_redirects = 0) {
+
+  // keep track of redirects
+  $count_redirects = $count_redirects + 1;
+  if ($count_redirects > 10) {
+    drupal_goto("/");
+    return;
+  }
+
+  // role and register id
+  $approved_role = user_role_load_by_name("approved user"); // $approved_role->rid
+  $register_flag = flag_get_flag("event_register"); // $register_flag->fid
+
+  // select random user who has registered for event in past year
+  $query_sql = "SELECT uid FROM flagging WHERE fid = :fid AND timestamp >= UNIX_TIMESTAMP(DATE_SUB(NOW(),INTERVAL 1 YEAR)) ORDER BY RAND() LIMIT 1";
+  $query = db_query($query_sql, array(':fid' => $register_flag->fid));
+  $results = $query->fetchAll();
+
+  // get results
+  $random_ids = array();
+  foreach ($results as $result) {
+    $random_ids[] = $result->uid;
+  }
+
+  // has random user
+  if (sizeof($random_ids) > 0) {
+
+    // retry if random user
+    $account = user_load($random_ids[0]);
+    if (isset($account->field_user_has_private_profile[LANGUAGE_NONE][0]['value'])) {
+      if ($account->field_user_has_private_profile[LANGUAGE_NONE][0]['value']) {
+        tm_users_redirect_to_random_user($count_redirects);
+        return;
+      }
+    }
+ 
+    // retry if not approved
+    if (!in_array("approved user", $account->roles)) {
+      tm_users_redirect_to_random_user($count_redirects);
+      return;
+    }
+
+    // go to user account
+    drupal_goto("user/" . $random_ids[0]);
+    return;
+  }
+
+  drupal_set_message("Sorry, you don't get lucky today.", "help-tip");
+  drupal_goto("/");
+}
+
+/**
+ * Redirect to avatar url
+ */
+function tm_users_redirect_avatar_url($encrypted_uid) {
+
+  global $conf;
+
+  // decrypt uid
+  $uid = tm_users_encrypt_uid('decrypt', $encrypted_uid);
+  
+  // load user
+  if ($uid != null) {
+    $account = user_load($uid);
+  }
+
+  // get image url
+  if (($account == null) or ($uid == null)) {
+    $image_url = image_style_url("avatar", $conf["tm_images_default_field_avatar"]); ;
+  } else {
+    $image_url = image_style_url("avatar", _tm_users_get_avatar_uri($account));
+  }
+
+  // redirect to url
+  drupal_goto($image_url, array('external' => TRUE));  
+}
+
+/**
+ * Redirect to profile URL
+ */
+function tm_users_redirect_profile_url($encrypted_uid) {
+
+  // decrypt uid
+  $uid = tm_users_encrypt_uid('decrypt', $encrypted_uid);
+  
+  // load user
+  if ($uid == null) {
+    $profile_url = "/";
+  } else {
+    $profile_url = drupal_get_path_alias("user/" . $uid);
+  }
+  
+  // redirect to profile
+  drupal_goto($profile_url);
+  
+}
+
+/**
+ * Redirect to profile edit URL
+ */
+function tm_users_redirect_edit_settings() {
+
+  if (user_is_logged_in()) {
+    global $user;
+    drupal_goto("user/" . $user->uid . "/edit");
+  } else {
+    drupal_set_message("You must be signed in to edit your profile.");
+    drupal_goto("/");
+  }
+  
+}
+
+/**
+ * Redirect to sign up URL, or profile
+ */
+function tm_users_redirect_sign_up() {
+
+  if (user_is_logged_in()) {
+    global $user;
+    drupal_goto("user/" . $user->uid);
+  } else {
+    drupal_goto("user/register");
+  }
+  
+}
+
